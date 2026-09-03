@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Room 1</title>
+<style>
+body{margin:0;overflow:hidden;background:#000;}
+canvas{display:block;}
+#exitFade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9999;transition:opacity 0.6s ease;}
+#exitFade.show{opacity:1;}
+#fadeOverlay{position:fixed;inset:0;background:#000;z-index:9999;animation:fadeOut 0.8s ease forwards;}
+@keyframes fadeOut{from{opacity:1;}to{opacity:0;}}
+#doorHint{position:absolute;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#ffdd88;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
+#instructionLine{position:absolute;top:8px;left:50%;transform:translateX(-50%);padding:5px 12px;font-size:11px;color:#bbb;background:rgba(0,0,0,0.60);border-radius:8px;z-index:30;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;white-space:nowrap;max-width:70vw;overflow:hidden;text-overflow:ellipsis;}
+#roomLabel{position:fixed;top:0;left:50%;transform:translateX(-50%);padding:0 20px;background:none;color:rgba(255,255,255,0.7);font-size:13px;font-family:system-ui,Arial,sans-serif;z-index:62;pointer-events:none;display:none;line-height:36px;}
+#editHud{position:fixed;top:58px;left:50%;transform:translateX(-50%);z-index:60;display:flex;gap:8px;align-items:center;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;}
+#editBtn,#saveBtn,#loadBtn{padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:rgba(0,0,0,0.72);color:#eee;cursor:pointer;user-select:none;}
+#editIndicator{padding:6px 10px;border-radius:999px;font-size:12px;letter-spacing:0.4px;border:1px solid rgba(255,255,255,0.20);background:rgba(80,20,20,0.8);color:#ffd0d0;}
+#editIndicator.on{background:rgba(20,80,20,0.85);color:#d5ffd5;}
+#editLight{display:inline-block;margin-right:8px;font-size:13px;color:#444;vertical-align:middle;cursor:pointer;transition:color 0.25s,text-shadow 0.25s;}
+#editLight.on{color:#44ff88;text-shadow:0 0 6px #44ff88,0 0 12px #44ff88;}
+#editHint{position:fixed;top:42px;left:50%;transform:translateX(-50%);padding:7px 16px;background:rgba(0,0,0,0.8);color:#aaffaa;border-radius:7px;font-size:13px;display:none;z-index:60;font-family:system-ui,Arial,sans-serif;pointer-events:none;}
+#selInfo{position:fixed;top:48px;left:10px;padding:8px 12px;background:rgba(0,0,0,0.8);color:#aaddff;border-radius:8px;font-size:12px;display:none;z-index:60;font-family:monospace;}
+#autoStatus{
+position:fixed;top:108px;left:50%;transform:translateX(-50%);
+padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.18);
+background:rgba(0,0,0,0.65);color:#d7f7d7;
+font:12px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+display:none;z-index:70;pointer-events:none;white-space:nowrap;}
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="autoStatus"></div>
+<div id="doorHint">Press E — Return to Hallway</div>
+<div id="instructionLine">
+<span id="editLight" title="Edit Mode (press M or use ☰ Menu)">●</span>
+<b>ROOM 1</b> — W/↑ Forward • S/↓ Back • ←/→ Turn • R Rotate • M = Edit Mode • Shift+C = Copy picture • E = Exit
+</div>
+<div id="roomLabel"></div>
+<div id="editHud">
+<button id="editBtn" type="button">Edit Mode</button>
+<button id="saveBtn" type="button">Save Layout</button>
+<button id="loadBtn" type="button">Load Layout</button>
+<div id="editIndicator">OFF</div>
+</div>
+<div id="editHint">Click object to select • ←→↑↓ Move • Shift+↑↓ Height • R Rotate • Shift+C Copy • Del Remove • Esc Deselect</div>
+<div id="selInfo"></div>
+<div id="fadeOverlay"></div>
+<script src="../../../three.min.js"></script>
+<script>
+const S = 0.5;
+
+// Layout constants
+const HW = 220*S;   // hallway width
+const HL = 2400*S;  // hallway length (fits 3 rooms per side)
+const RW = 1100*S;  // room width (doubled)
+const RD = 900*S;   // room depth (doubled)
+const RH = 340*S;   // room height
+const HH = 360*S;   // hallway height
+const WT = 18*S;    // wall thickness
+const DW = 140*S;   // door width
+const DH = 240*S;   // door height
+// Interior bedroom dividing wall
+const BDW = RW*0.45; // bedroom section width (45% of room)
+
+// Room positions along hallway (3 per side, evenly spaced)
+const ROOM_SPACING = 0;
+const ROOM_ZS = [0];
+const ROOM_NAMES = ['Room 1'];
+// Rooms 1-3 on left (negative X), 4-6 on right (positive X)
+
+let scene, camera, renderer;
+let moveForward=false, moveBackward=false, turnLeft=false, turnRight=false;
+let yaw=Math.PI, prevTime=performance.now();
+let nearExit=false, exitTriggered=false;
+
+// ── EDIT SYSTEM ──────────────────────────────────────────────────────
+let EDIT_MODE=false;
+let editableObjects=[];
+let selectedObj=null;
+const SAVE_KEY='room1_layout';
+const _ray=new THREE.Raycaster();
+const _mouse=new THREE.Vector2();
+let _editIdSeq=0;
+
+function eId(prefix,roomIdx){ return prefix+'_r'+roomIdx+'_'+(++_editIdSeq); }
+function reg(mesh,id){ if(!mesh.userData)mesh.userData={}; mesh.userData.editId=id; editableObjects.push(mesh); return mesh; }
+
+// Group-based furniture: all parts move together
+function makeGroup(id){
+  const g=new THREE.Group();
+  g.userData={editId:id};
+  scene.add(g);
+  editableObjects.push(g);
+  return g;
+}
+// Add a box to a group (position relative to group origin)
+function GB(group,w,h,d,m,x,y,z){
+  const mesh=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);
+  mesh.position.set(x,y,z);
+  group.add(mesh);
+  return mesh;
+}
+function GC(group,rt,rb,h,seg,m,x,y,z){
+  const mesh=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,seg),m);
+  mesh.position.set(x,y,z);
+  group.add(mesh);
+  return mesh;
+}
+
+function updateEditUI(){
+  const ind=document.getElementById('editIndicator');
+  if(ind){ind.textContent=EDIT_MODE?'ON':'OFF';ind.classList.toggle('on',EDIT_MODE);}
+  const light=document.getElementById('editLight');
+  if(light){light.classList.toggle('on',EDIT_MODE);light.title=EDIT_MODE?'Edit Mode ON — click or press M to turn off':'Edit Mode OFF — click or press M to turn on';}
+  const menuBtn=document.getElementById('rightMenuBtn');
+  if(menuBtn){menuBtn.textContent=EDIT_MODE?'☰ Menu  ✏️':'☰ Menu';menuBtn.style.borderColor=EDIT_MODE?'rgba(68,255,136,0.6)':'rgba(255,255,255,0.25)';}
+  const editBtn=document.getElementById('editBtn');
+  if(editBtn){editBtn.textContent=EDIT_MODE?'✏️ Edit Mode: ON':'Edit Mode: OFF';editBtn.style.background=EDIT_MODE?'rgba(20,80,20,0.85)':'rgba(0,0,0,0.72)';editBtn.style.color=EDIT_MODE?'#d5ffd5':'#eee';}
+  document.getElementById('editHint').style.display=EDIT_MODE?'block':'none';
+}
+function toggleEdit(){
+  EDIT_MODE=!EDIT_MODE;
+  updateEditUI();
+  if(!EDIT_MODE) deselect();
+}
+function deselect(){
+  if(selectedObj){
+    (selectedObj.userData._emvList||[]).forEach(({child,origMat})=>{
+      child.material.dispose();
+      child.material=origMat;
+    });
+    selectedObj.userData._emvList=[];
+  }
+  selectedObj=null;
+  document.getElementById('selInfo').style.display='none';
+}
+function selectObj(obj){
+  deselect(); selectedObj=obj;
+  obj.userData._emvList=[];
+  // Collect all meshes (group children or just the mesh)
+  const targets=[];
+  if(obj.isGroup){ obj.traverse(ch=>{ if(ch.isMesh) targets.push(ch); }); }
+  else if(obj.isMesh) targets.push(obj);
+  targets.forEach(child=>{
+    if(child.material&&child.material.emissive!==undefined){
+      // Clone the material so shared materials don't all highlight
+      const origMat=child.material;
+      const cloned=child.material.clone();
+      child.material=cloned;
+      obj.userData._emvList.push({child,origMat,cloned});
+      cloned.emissive.setHex(0x226622);
+    }
+  });
+  updateSelInfo();
+}
+function updateSelInfo(){
+  if(!selectedObj)return;
+  const p=selectedObj.position;
+  const el=document.getElementById('selInfo');
+  el.style.display='block';
+  el.textContent=`[${selectedObj.userData.editId}]  X:${p.x.toFixed(1)}  Y:${p.y.toFixed(1)}  Z:${p.z.toFixed(1)}  RY:${(selectedObj.rotation.y*180/Math.PI).toFixed(0)}°`;
+}
+function showAutoStatus(msg,ok=true){
+  const el=document.getElementById('autoStatus');
+  if(!el)return;
+  el.style.display='block';
+  el.style.color=ok?'#d7f7d7':'#ffd7d7';
+  el.textContent=msg;
+  setTimeout(()=>{el.style.display='none';},2200);
+}
+function saveLayout(){
+  const deleted=editableObjects.filter(o=>o&&o.userData&&o.userData.editId&&o.userData._deleted).map(o=>o.userData.editId);
+  const data=editableObjects.filter(o=>o&&o.userData&&o.userData.editId&&!o.userData._deleted).map(o=>({
+    id:o.userData.editId,px:o.position.x,py:o.position.y,pz:o.position.z,ry:o.rotation.y
+  }));
+  const _json=JSON.stringify({layout:data,deleted});
+  localStorage.setItem(SAVE_KEY,_json);
+  // snapshot
+  const _now=new Date();
+  const _d=_now.getFullYear()+'-'+String(_now.getMonth()+1).padStart(2,'0')+'-'+String(_now.getDate()).padStart(2,'0');
+  const _t=String(_now.getHours()).padStart(2,'0')+'-'+String(_now.getMinutes()).padStart(2,'0')+'-'+String(_now.getSeconds()).padStart(2,'0');
+  const _ms=String(_now.getMilliseconds()).padStart(3,'0');
+  const _seqK=SAVE_KEY+'_snap_seq';
+  const _seq=(parseInt(localStorage.getItem(_seqK)||'0',10)+1);
+  localStorage.setItem(_seqK,String(_seq));
+  const _snapK=SAVE_KEY+'_snap_'+_d+'_'+_t+'-'+_ms+'_'+_seq;
+  localStorage.setItem(_snapK,_json);
+  const _idxK=SAVE_KEY+'_snap_index';
+  const _list=JSON.parse(localStorage.getItem(_idxK)||'[]');
+  _list.unshift(_snapK);
+  if(_list.length>5)_list.splice(5);
+  localStorage.setItem(_idxK,JSON.stringify(_list));
+  const _sel=document.getElementById('snapshotSelect');
+  if(_sel){_sel.innerHTML='';_list.forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;_sel.appendChild(o);});_sel.value=_snapK;}
+  showAutoStatus('✅ Saved snapshot',true);
+  const btn=document.getElementById('saveBtn');
+  if(btn){const orig=btn.textContent;btn.textContent='✅ Saved!';setTimeout(()=>btn.textContent=orig,1500);}
+}
+function loadLayout(){
+  const raw=localStorage.getItem(SAVE_KEY);
+  if(!raw) return;
+  let parsed;
+  try{ parsed=JSON.parse(raw); }catch(e){ return; }
+  // Support old format (array) and new format ({layout,deleted})
+  const layoutArr=Array.isArray(parsed)?parsed:(parsed.layout||[]);
+  const deletedIds=Array.isArray(parsed)?[]:(parsed.deleted||[]);
+  layoutArr.forEach(d=>{
+    const obj=editableObjects.find(o=>o.userData.editId===d.id);
+    if(obj){obj.position.set(d.px,d.py,d.pz);obj.rotation.y=d.ry;}
+  });
+  deletedIds.forEach(id=>{
+    const obj=editableObjects.find(o=>o.userData.editId===id);
+    if(obj){ obj.userData._deleted=true; scene.remove(obj); }
+  });
+}
+window.addEventListener('click',e=>{
+  if(!EDIT_MODE)return;
+  _mouse.x=(e.clientX/innerWidth)*2-1;
+  _mouse.y=-(e.clientY/innerHeight)*2+1;
+  _ray.setFromCamera(_mouse,camera);
+  // Check all scene children recursively so group members are hit
+  const hits=_ray.intersectObjects(scene.children,true);
+  if(hits.length>0){
+    // Walk up to find an editable parent (group or mesh)
+    let obj=hits[0].object;
+    while(obj){
+      if(obj.userData&&obj.userData.editId&&editableObjects.includes(obj)){selectObj(obj);return;}
+      obj=obj.parent;
+    }
+    deselect();
+  } else deselect();
+});
+
+// ── SEED LAYOUT — copy room 6 (idx=5) positions to all other rooms ──
+function seedLayout(){
+  const raw=localStorage.getItem(SAVE_KEY);
+  if(raw){ try{ const p=JSON.parse(raw); if(p.layout&&p.layout.length>0) return; }catch(e){} }
+  // Seed with room 6's saved positions (all _r5 IDs)
+  const layout=[
+    {id:"headboard_r5",px:495.5,py:0,pz:597.5,ry:1.5707963267948963},
+    {id:"bed_r5",px:493,py:0,pz:537.5,ry:1.5707963267948963},
+    {id:"toilet_r5",px:583,py:0,pz:323,ry:9.424777960769374},
+    {id:"shower_r5",px:406,py:0,pz:203.5,ry:4.71238898038469},
+    {id:"sink_r5",px:501.5,py:0,pz:325,ry:4.71238898038469},
+    {id:"bathtub_r5",px:549.5,py:0,pz:201.55,ry:17.278759594743857},
+    {id:"wardrobe_r5",px:489,py:0,pz:364.5,ry:10.995574287564269},
+    {id:"bedroom_rug_r5",px:558,py:0,pz:400,ry:0},
+    {id:"sofa_r5",px:218.5,py:0,pz:462.5,ry:1.5707963267948963},
+    {id:"coffee_table_r5",px:218.5,py:0,pz:522.5,ry:10.995574287564269},
+    {id:"dining_table_r5",px:219,py:0,pz:301,ry:0},
+    {id:"bookshelf_r5",px:219,py:0,pz:591.5,ry:9.424777960769374},
+    {id:"kitchen_counter_r5",px:306.5,py:0,pz:186.5,ry:6.2831853071795845},
+    {id:"kitchen_upper_r5",px:304,py:-35,pz:174,ry:0},
+    {id:"kitchen_sink_r5",px:299,py:0,pz:181.5,ry:0},
+    {id:"fridge_r5",px:356.5,py:0,pz:187.5,ry:12.566370614359164},
+    {id:"paint_door1_r5",px:63,py:92.9,pz:280,ry:1.5707963267948963},
+    {id:"paint_door2_r5",px:60.5,py:95.4,pz:512.5,ry:1.5707963267948963},
+    {id:"paint_lv_north_r5",px:501.5,py:90,pz:598.5,ry:3.1415926535897936},
+    {id:"paint_lv_south_r5",px:219,py:0,pz:614,ry:0},
+    {id:"vase_r5",px:199,py:0,pz:610,ry:0},
+    {id:"paint_lv_south2_r5",px:219,py:0,pz:614,ry:0},
+    {id:"paint_bd_south_r5",px:494,py:0,pz:614,ry:0},
+    {id:"paint_bd_north_r5",px:554,py:0,pz:176,ry:1.5707963267948963},
+    {id:"paint_bd_south2_r5",px:494,py:0,pz:614,ry:0},
+    {id:"paint_ex1_r5",px:167,py:95.6,pz:177.5,ry:12.566370614359164},
+    {id:"paint_ex2_r5",px:219,py:76.5,pz:612.5,ry:3.141592653589793},
+    {id:"paint_ex3_r5",px:386,py:91,pz:510,ry:14.137166941154058},
+    {id:"paint_ex4_r5",px:371.5,py:96.4,pz:330,ry:4.71238898038469},
+    {id:"paint_ex5_r5",px:372,py:94.6,pz:507.5,ry:10.995574287564269},
+  ];
+  const deleted=["dressingtable_r5","bedroom_painting_r5","clock_r5","plant_r5","floorplant_r5","print_bd_r5_0","print_bd_r5_1","sconce_lv_r5_0"];
+  localStorage.setItem(SAVE_KEY, JSON.stringify({layout, deleted}));
+}
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById('fadeOverlay');if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x0e0c0a);
+  scene.fog=new THREE.Fog(0x0e0c0a,200,1200);
+
+  camera=new THREE.PerspectiveCamera(72,innerWidth/innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(innerWidth,innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Dim corridor lighting
+  scene.add(new THREE.AmbientLight(0x1a1510,1.0));
+  // Wall sconces along hallway
+  ROOM_ZS.forEach(rz=>{
+    [-1,1].forEach(side=>{
+      const sconce=new THREE.PointLight(0xffcc88,0.9,200);
+      sconce.position.set(side*(HW/2+10*S),HH*0.7,rz); scene.add(sconce);
+    });
+  });
+  // Entry light
+  const entryLight=new THREE.PointLight(0xffddaa,1.0,250);
+  entryLight.position.set(0,HH*0.8,HL/2-50*S); scene.add(entryLight);
+
+  buildHallway();
+  buildAllRooms();
+  buildEntrance();
+  seedLayout();
+  loadLayout();
+
+  document.addEventListener('keydown',onKeyDown);
+  document.addEventListener('keyup',onKeyUp);
+  window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+  // Spawn just inside entrance
+  camera.position.set(HW/2+WT+30*S, 200*S, 0);
+  yaw=-Math.PI/2; // face toward corridor door
+  updateRotation();
+  animate();
+}
+
+// ── MATERIALS ──
+const wallMat  = new THREE.MeshLambertMaterial({color:0x3a3028});
+const floorMat = new THREE.MeshLambertMaterial({color:0x1e1a14});
+const ceilMat  = new THREE.MeshLambertMaterial({color:0x2a2420});
+const woodDoor = new THREE.MeshLambertMaterial({color:0x5c3a1e});
+const darkWood = new THREE.MeshLambertMaterial({color:0x2e1c0c});
+const brassMat = new THREE.MeshLambertMaterial({color:0xb8860b});
+const bedFrame = new THREE.MeshLambertMaterial({color:0x3a2810});
+const mattress = new THREE.MeshLambertMaterial({color:0xd4c8a8});
+const pillow   = new THREE.MeshLambertMaterial({color:0xf0ece4});
+const blanket  = new THREE.MeshLambertMaterial({color:[0x6a3a2a,0x2a4a6a,0x2a5a3a,0x5a3a6a,0x6a5a2a,0x4a2a4a]});
+const deskMat  = new THREE.MeshLambertMaterial({color:0x4a3018});
+const rugMats  = [0x8a3a2a,0x2a5a8a,0x3a7a4a,0x6a2a7a,0x7a6a2a,0x4a2a5a].map(c=>new THREE.MeshLambertMaterial({color:c}));
+const trimMat  = new THREE.MeshLambertMaterial({color:0x5a4a3a});
+const carpetMat= new THREE.MeshLambertMaterial({color:0x4a3e30});
+const sconceHousing=new THREE.MeshLambertMaterial({color:0x8a7a60});
+
+function B(w,h,d,m){ const mesh=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m); scene.add(mesh); return mesh; }
+function C(rt,rb,h,s,m){ const mesh=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,s),m); scene.add(mesh); return mesh; }
+
+function makeSVGTexture(svgString){
+  const b64=btoa(unescape(encodeURIComponent(svgString)));
+  const url='data:image/svg+xml;base64,'+b64;
+  const mat=new THREE.MeshLambertMaterial({transparent:false,color:0xffffff});
+  new THREE.TextureLoader().load(url, function(tex){
+    tex.encoding=THREE.sRGBEncoding;
+    mat.map=tex;
+    mat.needsUpdate=true;
+  });
+  return mat;
+}
+// ── makePainting: builds a framed picture group, facing +Z by default ──
+// Place the group, then rotate group.rotation.y to face the right wall.
+// fw/fh = canvas size, svg = SVG string (or null for flat colour mat)
+function makePainting(id, fw, fh, svgStr, flatMat){
+  const g=makeGroup(id);
+  const border=8*S;
+  // Frame box
+  const frame=new THREE.Mesh(new THREE.BoxGeometry(fw+border*2, fh+border*2, 6*S), darkWood);
+  g.add(frame);
+  // Canvas plane sits just in front of frame face
+  const canvasMat=svgStr ? makeSVGTexture(svgStr) : (flatMat||darkWood);
+  const canvas=new THREE.Mesh(new THREE.PlaneGeometry(fw, fh), canvasMat);
+  canvas.position.z=4*S; // flush to front face of frame
+  g.add(canvas);
+  if(svgStr) regSVG(id, svgStr);
+  return g;
+}
+
+// ── SVG REGISTRY — maps group editId prefix to SVG string ──
+const _svgRegistry={};
+function regSVG(id,svgStr){ _svgRegistry[id]=svgStr; }
+
+// ── ROOM 6 SVG ART (roomIdx === 5) ──
+const SVG_WARM_FIELDS=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#1a0a04"/><rect x="0" y="140" width="300" height="80" fill="#8a3a10"/><rect x="0" y="100" width="300" height="55" fill="#c45a18"/><rect x="0" y="60" width="300" height="50" fill="#e88030"/><rect x="0" y="20" width="300" height="50" fill="#f4b060"/><rect x="0" y="0" width="300" height="28" fill="#fad090"/><ellipse cx="80" cy="48" rx="60" ry="38" fill="#ffeeaa" opacity="0.18"/><ellipse cx="220" cy="30" rx="40" ry="28" fill="#fff0c0" opacity="0.12"/><rect x="30" y="148" width="4" height="72" fill="#3a1a00" opacity="0.5"/><rect x="90" y="152" width="3" height="68" fill="#3a1a00" opacity="0.4"/><rect x="160" y="144" width="5" height="76" fill="#3a1a00" opacity="0.5"/><rect x="240" y="150" width="3" height="70" fill="#3a1a00" opacity="0.4"/></svg>`;
+const SVG_OCEAN_DEPTH=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#020c18"/><rect x="0" y="0" width="300" height="80" fill="#042c53" opacity="0.9"/><rect x="0" y="60" width="300" height="70" fill="#0c447c" opacity="0.7"/><rect x="0" y="110" width="300" height="60" fill="#185fa5" opacity="0.6"/><rect x="0" y="150" width="300" height="70" fill="#378add" opacity="0.4"/><ellipse cx="150" cy="90" rx="120" ry="60" fill="#85b7eb" opacity="0.08"/><line x1="0" y1="80" x2="300" y2="85" stroke="#378add" stroke-width="1.5" opacity="0.4"/><line x1="0" y1="110" x2="300" y2="105" stroke="#85b7eb" stroke-width="1" opacity="0.3"/><line x1="0" y1="140" x2="300" y2="138" stroke="#b5d4f4" stroke-width="0.8" opacity="0.25"/><circle cx="70" cy="70" r="30" fill="none" stroke="#378add" stroke-width="1" opacity="0.3"/><circle cx="220" cy="130" r="45" fill="none" stroke="#185fa5" stroke-width="1.5" opacity="0.2"/></svg>`;
+const SVG_DUSK_LINES=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#1a0a18"/><rect x="0" y="0" width="300" height="22" fill="#534ab7"/><rect x="0" y="20" width="300" height="22" fill="#7f77dd"/><rect x="0" y="40" width="300" height="22" fill="#afa9ec"/><rect x="0" y="60" width="300" height="22" fill="#d4539e" opacity="0.8"/><rect x="0" y="80" width="300" height="22" fill="#993556" opacity="0.9"/><rect x="0" y="100" width="300" height="22" fill="#722465" opacity="0.8"/><rect x="0" y="120" width="300" height="22" fill="#4b1528"/><rect x="0" y="140" width="300" height="22" fill="#26215c"/><rect x="0" y="160" width="300" height="22" fill="#3c3489"/><rect x="0" y="180" width="300" height="40" fill="#26215c"/></svg>`;
+const SVG_NIGHT_BLOOM=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#04140a"/><circle cx="150" cy="110" r="90" fill="#0f6e56" opacity="0.3"/><circle cx="150" cy="110" r="60" fill="#1d9e75" opacity="0.25"/><circle cx="150" cy="110" r="35" fill="#5dcaa5" opacity="0.2"/><ellipse cx="205" cy="55" rx="18" ry="9" transform="rotate(45 205 55)" fill="#1d9e75" opacity="0.6"/><ellipse cx="234" cy="110" rx="18" ry="9" transform="rotate(90 234 110)" fill="#1d9e75" opacity="0.6"/><ellipse cx="205" cy="165" rx="18" ry="9" transform="rotate(135 205 165)" fill="#1d9e75" opacity="0.6"/><ellipse cx="150" cy="194" rx="18" ry="9" fill="#1d9e75" opacity="0.6"/><ellipse cx="95" cy="165" rx="18" ry="9" transform="rotate(45 95 165)" fill="#1d9e75" opacity="0.6"/><ellipse cx="66" cy="110" rx="18" ry="9" transform="rotate(90 66 110)" fill="#1d9e75" opacity="0.6"/><ellipse cx="95" cy="55" rx="18" ry="9" transform="rotate(135 95 55)" fill="#1d9e75" opacity="0.6"/><ellipse cx="150" cy="26" rx="18" ry="9" fill="#1d9e75" opacity="0.6"/><circle cx="150" cy="110" r="12" fill="#9fe1cb" opacity="0.7"/></svg>`;
+const SVG_GRAN=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 200" width="160" height="200"><rect width="160" height="200" fill="#e8dfd0"/><rect x="0" y="130" width="160" height="70" fill="#b8a898"/><circle cx="55" cy="90" r="28" fill="#d4a870"/><rect x="30" y="110" width="50" height="60" fill="#6a4a30" rx="4"/><ellipse cx="55" cy="68" rx="22" ry="18" fill="#c49060" opacity="0.6"/><rect x="33" y="65" width="44" height="6" fill="#7a5a30" opacity="0.5" rx="3"/><circle cx="48" cy="87" r="3" fill="#5a3a18"/><circle cx="62" cy="87" r="3" fill="#5a3a18"/><path d="M47 98 Q55 104 63 98" fill="none" stroke="#5a3a18" stroke-width="1.5" stroke-linecap="round"/><circle cx="105" cy="88" r="26" fill="#d4a870"/><rect x="82" y="108" width="46" height="62" fill="#3a4a6a" rx="4"/><ellipse cx="105" cy="68" rx="20" ry="16" fill="#c49060" opacity="0.5"/><rect x="84" y="65" width="42" height="5" fill="#3a2810" opacity="0.5" rx="2"/><circle cx="98" cy="85" r="3" fill="#3a2810"/><circle cx="112" cy="85" r="3" fill="#3a2810"/><path d="M97 96 Q105 103 113 96" fill="none" stroke="#3a2810" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+
+// ── EXTRA ABSTRACT PAINTINGS ──
+// Desert canyon — warm terracotta layered bands with rock silhouettes
+const SVG_DESERT_CANYON=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#f0d0a0"/><rect x="0" y="0" width="300" height="60" fill="#b0c8e8"/><rect x="0" y="55" width="300" height="5" fill="#c8a870" opacity="0.6"/><rect x="0" y="60" width="300" height="30" fill="#e8c080"/><rect x="0" y="88" width="300" height="25" fill="#d4944a"/><rect x="0" y="110" width="300" height="22" fill="#b87030"/><rect x="0" y="130" width="300" height="20" fill="#9a5020"/><rect x="0" y="148" width="300" height="72" fill="#6a3010"/><polygon points="0,148 40,90 80,130 120,80 160,120 200,70 240,115 280,85 300,110 300,148" fill="#7a3818"/><polygon points="0,220 0,165 50,140 100,155 150,135 200,150 250,138 300,148 300,220" fill="#4a1c08"/><ellipse cx="60" cy="30" rx="25" ry="20" fill="#ffeedd" opacity="0.5"/></svg>`;
+
+// Stormy sea — dark dramatic waves with foam
+const SVG_STORMY_SEA=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#080e18"/><rect x="0" y="0" width="300" height="100" fill="#0c1828"/><rect x="0" y="80" width="300" height="60" fill="#122040" opacity="0.9"/><path d="M0 120 Q30 100 60 118 Q90 136 120 112 Q150 88 180 110 Q210 132 240 108 Q270 84 300 105 L300 220 L0 220Z" fill="#0a1830"/><path d="M0 140 Q25 122 55 138 Q85 154 115 132 Q145 110 175 130 Q205 150 235 128 Q265 106 300 125 L300 220 L0 220Z" fill="#102038"/><path d="M0 160 Q35 144 70 158 Q105 172 140 150 Q175 128 210 148 Q245 168 280 150 L300 155 L300 220 L0 220Z" fill="#162840"/><path d="M20 118 Q35 112 50 118" fill="none" stroke="#c8d8e8" stroke-width="2" opacity="0.4"/><path d="M130 108 Q148 102 166 110" fill="none" stroke="#c8d8e8" stroke-width="2" opacity="0.35"/><path d="M230 104 Q248 98 265 106" fill="none" stroke="#c8d8e8" stroke-width="1.5" opacity="0.3"/><rect x="0" y="0" width="300" height="30" fill="#1a2030" opacity="0.7"/><ellipse cx="150" cy="18" rx="80" ry="14" fill="#303848" opacity="0.5"/></svg>`;
+
+// Moonlit mountain — cool blues and purples, sharp peaks
+const SVG_MOONLIT_MOUNTAIN=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#080818"/><rect x="0" y="0" width="300" height="120" fill="#0c0c28"/><circle cx="240" cy="35" r="28" fill="#f0f0d0" opacity="0.9"/><circle cx="248" cy="30" r="22" fill="#0c0c28"/><rect x="0" y="100" width="300" height="120" fill="#1a1030"/><polygon points="0,220 0,140 60,80 120,140 150,100 200,150 240,90 280,140 300,130 300,220" fill="#28183a"/><polygon points="0,220 0,160 50,120 100,165 130,130 170,160 210,115 260,158 300,140 300,220" fill="#1a1028"/><polygon points="0,220 30,180 80,155 120,185 160,158 200,178 250,162 300,175 300,220" fill="#120c20"/><rect x="0" y="195" width="300" height="25" fill="#0a0818" opacity="0.8"/><circle cx="60" cy="12" r="1.5" fill="#ffffff" opacity="0.7"/><circle cx="100" cy="25" r="1" fill="#ffffff" opacity="0.5"/><circle cx="170" cy="8" r="1.5" fill="#ffffff" opacity="0.8"/><circle cx="200" cy="30" r="1" fill="#ffffff" opacity="0.4"/><circle cx="30" cy="40" r="1" fill="#ffffff" opacity="0.6"/></svg>`;
+
+// Autumn grove — warm orange and gold vertical tree trunks
+const SVG_AUTUMN_GROVE=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#c84010"/><rect x="0" y="0" width="300" height="80" fill="#f0a020" opacity="0.7"/><rect x="0" y="0" width="300" height="40" fill="#f8c840" opacity="0.5"/><rect x="0" y="160" width="300" height="60" fill="#3a1808"/><rect x="0" y="140" width="300" height="30" fill="#5a2810" opacity="0.8"/><rect x="18" y="60" width="14" height="160" fill="#2a1006" opacity="0.85"/><rect x="60" y="40" width="10" height="180" fill="#3a1808" opacity="0.8"/><rect x="100" y="50" width="16" height="170" fill="#2a1006" opacity="0.9"/><rect x="148" y="30" width="12" height="190" fill="#3a1808" opacity="0.85"/><rect x="195" y="55" width="14" height="165" fill="#2a1006" opacity="0.8"/><rect x="238" y="45" width="10" height="175" fill="#3a1808" opacity="0.75"/><rect x="272" y="60" width="16" height="160" fill="#2a1006" opacity="0.85"/><ellipse cx="25" cy="55" rx="30" ry="22" fill="#e85010" opacity="0.6"/><ellipse cx="65" cy="38" rx="28" ry="20" fill="#f08020" opacity="0.5"/><ellipse cx="108" cy="45" rx="32" ry="24" fill="#d04010" opacity="0.55"/><ellipse cx="154" cy="28" rx="30" ry="22" fill="#e8a020" opacity="0.5"/><ellipse cx="202" cy="50" rx="28" ry="20" fill="#c83010" opacity="0.6"/><ellipse cx="243" cy="40" rx="26" ry="18" fill="#f09020" opacity="0.5"/><ellipse cx="280" cy="55" rx="28" ry="20" fill="#d05010" opacity="0.55"/></svg>`;
+
+// Minimalist — single bold colour block composition
+const SVG_COLOUR_BLOCKS=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#f0ece4"/><rect x="0" y="0" width="180" height="140" fill="#c04030"/><rect x="180" y="0" width="120" height="80" fill="#1a3a6a"/><rect x="180" y="80" width="120" height="60" fill="#f0c030"/><rect x="0" y="140" width="120" height="80" fill="#2a6a3a"/><rect x="120" y="140" width="180" height="80" fill="#c07030"/><rect x="176" y="0" width="4" height="220" fill="#f0ece4"/><rect x="0" y="136" width="300" height="4" fill="#f0ece4"/><rect x="180" y="76" width="120" height="4" fill="#f0ece4"/><rect x="116" y="140" width="4" height="80" fill="#f0ece4"/></svg>`;
+
+const SVG_CIRCLES=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#0a0a14"/><circle cx="80" cy="110" r="72" fill="none" stroke="#e03060" stroke-width="18" opacity="0.55"/><circle cx="160" cy="80" r="60" fill="none" stroke="#30a0e0" stroke-width="14" opacity="0.5"/><circle cx="220" cy="140" r="66" fill="none" stroke="#f0c020" stroke-width="16" opacity="0.45"/><circle cx="130" cy="160" r="48" fill="none" stroke="#50d080" stroke-width="12" opacity="0.4"/><circle cx="80" cy="110" r="30" fill="#e03060" opacity="0.18"/><circle cx="220" cy="140" r="28" fill="#f0c020" opacity="0.15"/><circle cx="160" cy="80" r="22" fill="#30a0e0" opacity="0.2"/></svg>`;
+
+const SVG_BRUSHSTROKES=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#f8f4ee"/><rect x="-20" y="20" width="200" height="38" rx="18" transform="rotate(-12 60 40)" fill="#c0392b" opacity="0.85"/><rect x="60" y="60" width="220" height="32" rx="16" transform="rotate(8 170 76)" fill="#2471a3" opacity="0.8"/><rect x="-10" y="110" width="180" height="28" rx="14" transform="rotate(-6 80 124)" fill="#1e8449" opacity="0.75"/><rect x="100" y="130" width="210" height="34" rx="17" transform="rotate(10 205 147)" fill="#d4a017" opacity="0.8"/><rect x="10" y="168" width="160" height="24" rx="12" transform="rotate(-8 90 180)" fill="#7d3c98" opacity="0.7"/><rect x="170" y="170" width="150" height="26" rx="13" transform="rotate(5 245 183)" fill="#c0392b" opacity="0.5"/></svg>`;
+
+// ── EXTRA FAMILY PHOTOS ──
+// Birthday party — three people with hats and cake
+const SVG_BIRTHDAY=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 180" width="200" height="180"><rect width="200" height="180" fill="#faeeda"/><rect x="0" y="125" width="200" height="55" fill="#f4c060" opacity="0.4"/><circle cx="40" cy="72" r="20" fill="#d4986a"/><rect x="22" y="89" width="36" height="56" fill="#e04040" rx="3"/><polygon points="40,30 28,55 52,55" fill="#e04040"/><rect x="36" y="28" width="8" height="6" fill="#f0c030"/><circle cx="40" cy="70" r="2.5" fill="#3a2010"/><circle cx="50" cy="70" r="2.5" fill="#3a2010"/><path d="M39 81 Q44 86 50 81" fill="none" stroke="#3a2010" stroke-width="1.5" stroke-linecap="round"/><circle cx="100" cy="68" r="22" fill="#c88848"/><rect x="80" y="87" width="40" height="58" fill="#4040c0" rx="3"/><polygon points="100,24 86,52 114,52" fill="#4040c0"/><rect x="96" y="22" width="8" height="6" fill="#f0c030"/><circle cx="93" cy="66" r="2.5" fill="#3a2010"/><circle cx="107" cy="66" r="2.5" fill="#3a2010"/><path d="M92 78 Q100 85 108 78" fill="none" stroke="#3a2010" stroke-width="1.5" stroke-linecap="round"/><circle cx="162" cy="72" r="20" fill="#e8b870"/><rect x="144" y="89" width="36" height="56" fill="#40a040" rx="3"/><polygon points="162,30 150,55 174,55" fill="#40a040"/><rect x="158" y="28" width="8" height="6" fill="#f0c030"/><circle cx="156" cy="70" r="2.5" fill="#3a2010"/><circle cx="168" cy="70" r="2.5" fill="#3a2010"/><path d="M155 81 Q162 87 169 81" fill="none" stroke="#3a2010" stroke-width="1.5" stroke-linecap="round"/><rect x="70" y="138" width="60" height="28" fill="#f0f0f0" rx="3"/><rect x="78" y="130" width="8" height="12" fill="#e04040"/><rect x="96" y="128" width="8" height="14" fill="#4040c0"/><rect x="114" y="132" width="8" height="10" fill="#40a040"/><ellipse cx="82" cy="128" rx="5" ry="4" fill="#f0c030" opacity="0.8"/><ellipse cx="100" cy="126" rx="5" ry="4" fill="#f090a0" opacity="0.8"/><ellipse cx="118" cy="130" rx="5" ry="4" fill="#80d080" opacity="0.8"/></svg>`;
+
+// Wedding — bride and groom silhouettes
+const SVG_WEDDING=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 200" width="160" height="200"><rect width="160" height="200" fill="#f8f4f0"/><rect x="0" y="145" width="160" height="55" fill="#e8e0d0"/><circle cx="55" cy="68" r="22" fill="#d4a870"/><polygon points="33,200 33,108 55,98 77,108 77,200" fill="#f8f8f8"/><polygon points="20,200 33,108 55,98 77,108 90,200" fill="#f0ece8"/><ellipse cx="55" cy="50" rx="18" ry="14" fill="#c49060" opacity="0.6"/><circle cx="48" cy="66" r="2.5" fill="#3a2010"/><circle cx="62" cy="66" r="2.5" fill="#3a2010"/><path d="M47 78 Q55 85 63 78" fill="none" stroke="#3a2010" stroke-width="1.5" stroke-linecap="round"/><ellipse cx="55" cy="98" rx="30" ry="8" fill="#f0e8e0"/><circle cx="55" cy="42" rx="10" ry="6" fill="#f8f8f0"/><circle cx="105" cy="70" r="22" fill="#c88848"/><rect x="88" y="105" width="34" height="95" fill="#1a1a2a" rx="2"/><ellipse cx="105" cy="52" rx="18" ry="14" fill="#b87838" opacity="0.6"/><circle cx="98" cy="68" r="2.5" fill="#3a2010"/><circle cx="112" cy="68" r="2.5" fill="#3a2010"/><path d="M97 80 Q105 87 113 80" fill="none" stroke="#3a2010" stroke-width="1.5" stroke-linecap="round"/><rect x="98" y="105" width="14" height="4" fill="#f0f0e0"/><circle cx="88" cy="88" r="6" fill="#f0c0c8" opacity="0.8"/><circle cx="76" cy="82" r="5" fill="#f0c0c8" opacity="0.7"/><circle cx="82" cy="76" r="4" fill="#f0c0c8" opacity="0.6"/></svg>`;
+
+// Dog/pet portrait — family dog
+const SVG_PET=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160"><rect width="160" height="160" fill="#e8f0d8"/><rect x="0" y="110" width="160" height="50" fill="#c8d8a8" opacity="0.7"/><ellipse cx="80" cy="85" rx="45" ry="38" fill="#c8904a"/><ellipse cx="46" cy="55" rx="18" ry="28" fill="#b87838" transform="rotate(-15 46 55)"/><ellipse cx="114" cy="55" rx="18" ry="28" fill="#b87838" transform="rotate(15 114 55)"/><ellipse cx="80" cy="80" rx="38" ry="32" fill="#d4a060"/><ellipse cx="80" cy="95" rx="28" ry="18" fill="#c89050"/><circle cx="66" cy="72" r="7" fill="#2a1a08"/><circle cx="94" cy="72" r="7" fill="#2a1a08"/><circle cx="67" cy="71" r="3" fill="#ffffff" opacity="0.6"/><circle cx="95" cy="71" r="3" fill="#ffffff" opacity="0.6"/><ellipse cx="80" cy="90" rx="12" ry="8" fill="#3a1808"/><ellipse cx="80" cy="92" rx="10" ry="5" fill="#c04060"/><path d="M68 98 Q80 108 92 98" fill="none" stroke="#3a1808" stroke-width="2" stroke-linecap="round"/><ellipse cx="58" cy="68" rx="4" ry="2" fill="#a06030" opacity="0.5"/><ellipse cx="102" cy="68" rx="4" ry="2" fill="#a06030" opacity="0.5"/></svg>`;
+
+// Beach holiday — family on sand with sea behind
+const SVG_BEACH=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 170" width="220" height="170"><rect width="220" height="170" fill="#b8d8f0"/><rect x="0" y="80" width="220" height="90" fill="#e8d080"/><rect x="0" y="78" width="220" height="18" fill="#4090c0" opacity="0.7"/><ellipse cx="180" cy="28" rx="28" ry="22" fill="#f8e848" opacity="0.85"/><circle cx="45" cy="88" r="20" fill="#d4986a"/><rect x="27" y="105" width="36" height="55" fill="#e04848" rx="3"/><ellipse cx="45" cy="70" rx="16" ry="12" fill="#c4885a" opacity="0.7"/><circle cx="39" cy="86" r="2.5" fill="#3a2010"/><circle cx="51" cy="86" r="2.5" fill="#3a2010"/><path d="M38 97 Q45 104 52 97" fill="none" stroke="#3a2010" stroke-width="1.5" stroke-linecap="round"/><circle cx="105" cy="82" r="18" fill="#e8b870"/><rect x="89" y="97" width="32" height="58" fill="#2040a0" rx="3"/><ellipse cx="105" cy="66" rx="14" ry="11" fill="#d8a060" opacity="0.7"/><circle cx="99" cy="80" r="2.5" fill="#3a2010"/><circle cx="111" cy="80" r="2.5" fill="#3a2010"/><path d="M98 92 Q105 98 112 92" fill="none" stroke="#3a2010" stroke-width="1.5" stroke-linecap="round"/><circle cx="165" cy="86" r="17" fill="#c88040"/><rect x="150" y="100" width="30" height="60" fill="#40a848" rx="3"/><ellipse cx="165" cy="72" rx="14" ry="10" fill="#b87030" opacity="0.7"/><circle cx="159" cy="84" r="2.5" fill="#3a2010"/><circle cx="171" cy="84" r="2.5" fill="#3a2010"/><path d="M158 95 Q165 102 172 95" fill="none" stroke="#3a2010" stroke-width="1.5" stroke-linecap="round"/><ellipse cx="75" cy="140" rx="18" ry="5" fill="#d8c060" opacity="0.5"/><ellipse cx="140" cy="148" rx="22" ry="5" fill="#d8c060" opacity="0.4"/></svg>`;
+const SVG_KIDS=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 160" width="180" height="160"><rect width="180" height="160" fill="#eaf3de"/><rect x="0" y="110" width="180" height="50" fill="#97c459" opacity="0.5"/><circle cx="45" cy="72" r="22" fill="#e8b870"/><rect x="25" y="91" width="40" height="44" fill="#e85a30" rx="4"/><ellipse cx="45" cy="55" rx="18" ry="14" fill="#d8a060" opacity="0.7"/><circle cx="39" cy="70" r="2.5" fill="#3a2010"/><circle cx="51" cy="70" r="2.5" fill="#3a2010"/><path d="M38 80 Q45 87 52 80" fill="none" stroke="#4a2808" stroke-width="1.5" stroke-linecap="round"/><circle cx="90" cy="65" r="20" fill="#c88848"/><rect x="72" y="82" width="36" height="48" fill="#2a5a8a" rx="4"/><ellipse cx="90" cy="50" rx="16" ry="12" fill="#b87838" opacity="0.6"/><circle cx="84" cy="63" r="2.5" fill="#3a2010"/><circle cx="96" cy="63" r="2.5" fill="#3a2010"/><path d="M83 74 Q90 80 97 74" fill="none" stroke="#4a2808" stroke-width="1.5" stroke-linecap="round"/><circle cx="138" cy="74" r="20" fill="#e8c898"/><rect x="120" y="91" width="36" height="44" fill="#8a3a9a" rx="4"/><ellipse cx="138" cy="58" rx="16" ry="12" fill="#d8b888" opacity="0.6"/><circle cx="132" cy="72" r="2.5" fill="#3a2010"/><circle cx="144" cy="72" r="2.5" fill="#3a2010"/><path d="M131 83 Q138 89 145 83" fill="none" stroke="#4a2808" stroke-width="1.5" stroke-linecap="round"/></svg>`;
+const SVG_CHRISTMAS=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 160" width="200" height="160"><rect width="200" height="160" fill="#fcebeb"/><rect x="0" y="115" width="200" height="45" fill="#f7c1c1" opacity="0.6"/><circle cx="55" cy="78" r="23" fill="#e8b870"/><rect x="33" y="99" width="44" height="41" fill="#a32d2d" rx="4"/><ellipse cx="55" cy="60" rx="18" ry="14" fill="#d8a060" opacity="0.7"/><circle cx="48" cy="76" r="2.5" fill="#3a2010"/><circle cx="62" cy="76" r="2.5" fill="#3a2010"/><path d="M47 87 Q55 94 63 87" fill="none" stroke="#4a2808" stroke-width="1.5" stroke-linecap="round"/><circle cx="110" cy="72" r="20" fill="#d4986a"/><rect x="92" y="90" width="36" height="50" fill="#a32d2d" rx="4"/><ellipse cx="110" cy="57" rx="16" ry="12" fill="#c48858" opacity="0.6"/><circle cx="104" cy="70" r="2.5" fill="#3a2010"/><circle cx="116" cy="70" r="2.5" fill="#3a2010"/><path d="M103 82 Q110 88 117 82" fill="none" stroke="#4a2808" stroke-width="1.5" stroke-linecap="round"/><circle cx="158" cy="76" r="20" fill="#e8c898"/><rect x="140" y="94" width="36" height="46" fill="#185fa5" rx="4"/><ellipse cx="158" cy="60" rx="16" ry="12" fill="#d8b888" opacity="0.6"/><circle cx="152" cy="74" r="2.5" fill="#3a2010"/><circle cx="164" cy="74" r="2.5" fill="#3a2010"/><path d="M151 85 Q158 91 165 85" fill="none" stroke="#4a2808" stroke-width="1.5" stroke-linecap="round"/><circle cx="55" cy="46" r="8" fill="#e24b4a" opacity="0.8"/><circle cx="110" cy="38" r="7" fill="#e24b4a" opacity="0.8"/></svg>`;
+
+function buildHallway(){
+  // Minimal corridor outside the room door
+  const corrLen=150*S;
+  const cx=HW/2+RW/2+WT/2;
+  // Corridor floor
+  B(HW,2*S,corrLen,new THREE.MeshLambertMaterial({color:0x2a2018})).position.set(0,1*S,corrLen/2);
+  // Corridor ceiling
+  B(HW,8*S,corrLen,ceilMat).position.set(0,HH+4*S,corrLen/2);
+  // End wall
+  B(HW,HH,WT,wallMat).position.set(0,HH/2,corrLen+WT/2);
+  // Left wall
+  B(WT,HH,corrLen+WT,wallMat).position.set(-HW/2-WT/2,HH/2,corrLen/2);
+  // Right wall segment before door
+  B(WT,HH,(corrLen-DW)/2,wallMat).position.set(HW/2+WT/2,HH/2,(corrLen-DW)/4);
+  // Right wall above door
+  B(WT,HH-DH,DW,wallMat).position.set(HW/2+WT/2,DH+(HH-DH)/2,corrLen/2);
+  // Right wall segment after door
+  B(WT,HH,(corrLen-DW)/2,wallMat).position.set(HW/2+WT/2,HH/2,corrLen*3/4+DW/4);
+  // Corridor light
+  const cL=new THREE.PointLight(0xffddaa,0.8,250); cL.position.set(0,HH*0.8,corrLen/2); scene.add(cL);
+  // Runner carpet
+  B(HW*0.5,0.5*S,corrLen-10*S,carpetMat).position.set(0,2*S,corrLen/2);
+}
+
+function buildInnerWall(x, h, len, roomZs, dw, dh, side){
+  // Build wall segments between door openings
+  let z=-len/2;
+  roomZs.forEach(rz=>{
+    const segLen=(rz-dw/2)-z;
+    if(segLen>1){
+      const seg=B(WT,h,segLen,wallMat); seg.position.set(x,h/2,z+segLen/2);
+    }
+    // Above door
+    const above=B(WT,h-dh,dw,wallMat); above.position.set(x,dh+(h-dh)/2,rz);
+    z=rz+dw/2;
+  });
+  // Last segment
+  const lastLen=len/2-z;
+  if(lastLen>1){
+    const seg=B(WT,h,lastLen,wallMat); seg.position.set(x,h/2,z+lastLen/2);
+  }
+}
+
+function buildWallWithDoors(x, h, wt, len, roomZs, dw, dh, side){
+  // Solid outer room walls — rooms have their own internal walls
+  const wall=B(wt,h,len,wallMat); wall.position.set(x,h/2,0);
+}
+
+// ── ENTRANCE ──
+function buildEntrance(){ /* no entrance needed for standalone room */ }
+
+function buildDoubleDoor(cx,wz,dw,dh,dMat,frameMat,bMat,dir){
+  const gap=3*S, slabW=dw/2-gap/2;
+  // Jambs
+  [-1,1].forEach(s=>{
+    const jamb=new THREE.Mesh(new THREE.BoxGeometry(10*S,dh,WT+4*S),frameMat);
+    jamb.position.set(cx+s*(dw/2+5*S),dh/2,wz); scene.add(jamb);
+  });
+  [-1,1].forEach(s=>{
+    const sx=cx+s*(gap/2+slabW/2);
+    const slab=new THREE.Mesh(new THREE.BoxGeometry(slabW,dh,8*S),dMat);
+    slab.position.set(sx,dh/2,wz+dir*2*S); scene.add(slab);
+    // Raised panels
+    [[dh*0.78,dh*0.14],[dh*0.5,dh*0.22],[dh*0.16,dh*0.2]].forEach(([py,ph])=>{
+      const panel=new THREE.Mesh(new THREE.BoxGeometry(slabW-14*S,ph,5*S),frameMat);
+      panel.position.set(sx,py,wz+dir*6*S); scene.add(panel);
+    });
+    // Knob
+    const knob=new THREE.Mesh(new THREE.SphereGeometry(4*S,8,8),bMat);
+    knob.position.set(cx+s*(-4*S),dh*0.45,wz+dir*8*S); scene.add(knob);
+  });
+  // Gap strip
+  const gs=new THREE.Mesh(new THREE.BoxGeometry(gap,dh,WT+6*S),frameMat);
+  gs.position.set(cx,dh/2,wz); scene.add(gs);
+}
+
+// ── ALL 6 ROOMS ──
+function buildAllRooms(){
+  buildRoom(HW/2+RW/2+WT/2, 0, 5, 1);
+}
+
+function buildRoom(cx, rz, roomIdx, side){
+  const bMat=new THREE.MeshLambertMaterial({color:0x4a3828});
+  // Room floor
+  const fl=B(RW,2*S,RD,new THREE.MeshLambertMaterial({color:0x2a2018}));
+  fl.position.set(cx,1*S,rz-RD/2+RD/2);
+  // room carpet removed — was showing through walls
+  // Ceiling
+  const rc=B(RW,6*S,RD,ceilMat); rc.position.set(cx,RH+3*S,rz);
+  // Back wall (north end)
+  const backW=B(RW,RH,WT,wallMat); backW.position.set(cx,RH/2,rz-RD/2-WT/2);
+  // South wall (opposite end — bookshelf wall)
+  const southW=B(RW,RH,WT,wallMat); southW.position.set(cx,RH/2,rz+RD/2+WT/2);
+  // Side walls
+  const sw1=B(WT,RH,RD,wallMat); sw1.position.set(cx-RW/2-WT/2,RH/2,rz);
+  const sw2=B(WT,RH,RD,wallMat); sw2.position.set(cx+RW/2+WT/2,RH/2,rz);
+  // Front wall (corridor side) — with door opening — handled by inner wall segments
+
+  // Room light
+  const rLight=new THREE.PointLight(0xffddaa,0.0,0); // off by default (room is unoccupied)
+  rLight.position.set(cx,RH-20*S,rz); scene.add(rLight);
+  // Ceiling fixture (off)
+  const fix=B(16*S,4*S,16*S,new THREE.MeshLambertMaterial({color:0x666655}));
+  fix.position.set(cx,RH-2*S,rz);
+
+  // ── Single door in corridor wall ──
+  // Door frame (corridor side)
+  const frameX=side<0?-HW/2+WT/2:HW/2-WT/2;
+  // Corridor-side door frame — editable group
+  const entrFrameG=makeGroup('entrance_frame_r'+roomIdx);
+  entrFrameG.position.set(frameX,0,rz);
+  GB(entrFrameG,WT+4*S,DH,10*S,darkWood, 0,DH/2,-DW/2-6*S);
+  GB(entrFrameG,WT+4*S,DH,10*S,darkWood, 0,DH/2, DW/2+6*S);
+  GB(entrFrameG,WT+4*S,10*S,DW+12*S,darkWood, 0,DH+5*S,0);
+  // Corridor-side door — editable group
+  const entrDoorG=makeGroup('entrance_door_r'+roomIdx);
+  entrDoorG.position.set(frameX,DH/2,rz);
+  GB(entrDoorG,8*S,DH-4*S,DW-4*S,woodDoor, 0,0,0);
+  [[DH*0.75-DH/2,DH*0.18],[DH*0.42-DH/2,DH*0.35]].forEach(([py,ph])=>{
+    GB(entrDoorG,6*S,ph,DW-20*S,darkWood, 0,py,0);
+  });
+  GB(entrDoorG,4*S,4*S,4*S,brassMat, side*6*S,DH*0.45-DH/2,-(DW/2-14*S));
+  // Room-side door frame — editable group
+  const doorWallX2 = cx - side * RW/2;
+  const roomFrameG=makeGroup('room_frame_r'+roomIdx);
+  roomFrameG.position.set(doorWallX2,0,rz);
+  GB(roomFrameG,WT+4*S,DH,10*S,darkWood, 0,DH/2,-DW/2);
+  GB(roomFrameG,WT+4*S,DH,10*S,darkWood, 0,DH/2, DW/2);
+  GB(roomFrameG,WT+4*S,10*S,DW+12*S,darkWood, 0,DH+5*S,0);
+  // Room-side door — editable group
+  const roomDoorG=makeGroup('room_door_r'+roomIdx);
+  roomDoorG.position.set(doorWallX2,DH/2,rz);
+  GB(roomDoorG,8*S,DH-2*S,DW-4*S,woodDoor, 0,0,0);
+  [[DH*0.75-DH/2,DH*0.18],[DH*0.42-DH/2,DH*0.35]].forEach(([py,ph])=>{
+    GB(roomDoorG,6*S,ph,DW-20*S,darkWood, 0,py,0);
+  });
+  GB(roomDoorG,4*S,4*S,4*S,brassMat, -side*6*S,DH*0.45-DH/2,-(DW/2-14*S));
+  // Number plaque
+  const plaque=B(24*S,16*S,3*S,brassMat);
+  plaque.position.set(frameX,DH+20*S,rz+DW/2+16*S);
+
+  // ── Furniture ──
+  furnishRoom(cx, rz, roomIdx, side);
+}
+
+function furnishRoom(cx, rz, roomIdx, side){
+  const accent  = [0x6a3a2a,0x2a4a6a,0x2a5a3a,0x5a3a6a,0x6a5a2a,0x4a2a4a][roomIdx];
+  const artHue  = [0x8a6a4a,0x4a6a8a,0x5a8a6a,0x7a5a8a,0x8a7a4a,0x6a4a7a][roomIdx];
+  const upholst = new THREE.MeshLambertMaterial({color:accent});
+  const cush    = new THREE.MeshLambertMaterial({color:0xd4c8a8});
+  const artMat  = new THREE.MeshLambertMaterial({color:artHue});
+
+  // ── ROOM ORIENTATION ────────────────────────────────────────────────
+  // Corridor runs along Z. Rooms extend in X away from corridor.
+  // Door wall (corridor side): x = cx - side*RW/2
+  // Back wall (far from door): x = cx + side*RW/2
+  // Room Z extents: rz-RD/2 to rz+RD/2
+  const doorWallX = cx - side * RW/2;   // corridor/door side
+  const backWallX = cx + side * RW/2;   // far back wall
+  const northZ    = rz - RD/2;          // one end along corridor
+  const southZ    = rz + RD/2;          // other end along corridor
+
+  // Dividing wall runs along Z at 58% into room from door
+  // Living/dining = front 58%, Bedroom = back 42%
+  const divX = doorWallX + side * RW * 0.58;
+  const divDoorW = 110*S, divDoorH = 220*S;
+  const divDoorCentreZ = rz; // door centred along room Z
+
+  // Dividing wall with TWO door openings:
+  //   1) Bathroom door — near northZ end (living room -> bathroom)
+  //   2) Bedroom door  — centred at rz    (living room -> bedroom)
+  const btDepthEarly = RD * 0.38;
+  const btDoorCZ = northZ + btDepthEarly * 0.5;  // bathroom door centre
+  const btDW = 90*S, btDH = 220*S;               // bathroom door size
+  const bdDoorCZ = rz;                            // bedroom door centre
+
+  // Helper: build wall segment between two Z points with door opening
+  function wallSeg(z0, z1, doorCZ, doorW, doorH) {
+    const s1 = (doorCZ - doorW/2) - z0;
+    const s2 = z1 - (doorCZ + doorW/2);
+    if(s1 > 1){ B(WT,RH,s1,wallMat).position.set(divX, RH/2, z0+s1/2); }
+    if(s2 > 1){ B(WT,RH,s2,wallMat).position.set(divX, RH/2, z1-s2/2); }
+    B(WT,RH-doorH,doorW,wallMat).position.set(divX, doorH+(RH-doorH)/2, doorCZ);
+  }
+
+  // Segment northZ -> between the two doors (bathroom door first)
+  wallSeg(northZ, btDoorCZ + btDW/2 + (bdDoorCZ - btDoorCZ - btDW/2 - divDoorW/2)/2,
+          btDoorCZ, btDW, btDH);
+  // Segment between the two doors -> southZ (bedroom door)
+  wallSeg(btDoorCZ + btDW/2 + (bdDoorCZ - btDoorCZ - btDW/2 - divDoorW/2)/2,
+          southZ, bdDoorCZ, divDoorW, divDoorH);
+
+  // Bathroom door frame + door
+  const btFrameG=makeGroup('bathroom_frame_r'+roomIdx);
+  btFrameG.position.set(divX,0,btDoorCZ);
+  GB(btFrameG,WT+4*S,btDH,10*S,darkWood, 0,btDH/2,-btDW/2);
+  GB(btFrameG,WT+4*S,btDH,10*S,darkWood, 0,btDH/2, btDW/2);
+  GB(btFrameG,WT+4*S,10*S,btDW+12*S,darkWood, 0,btDH+5*S,0);
+  const btIDoor=makeGroup('bathroom_door_r'+roomIdx);
+  btIDoor.position.set(divX,btDH/2,btDoorCZ);
+  GB(btIDoor,8*S,btDH-2*S,btDW-4*S,woodDoor, 0,0,0);
+  const btIKnob=new THREE.Mesh(new THREE.SphereGeometry(3*S,8,8),brassMat);
+  btIKnob.position.set(divX+side*5*S,btDH*0.45,btDoorCZ+btDW/2-8*S); scene.add(btIKnob);
+
+  // Bedroom door frame + door
+  const bdFrameG=makeGroup('bedroom_frame_r'+roomIdx);
+  bdFrameG.position.set(divX,0,bdDoorCZ);
+  GB(bdFrameG,WT+4*S,divDoorH,10*S,darkWood, 0,divDoorH/2,-divDoorW/2);
+  GB(bdFrameG,WT+4*S,divDoorH,10*S,darkWood, 0,divDoorH/2, divDoorW/2);
+  GB(bdFrameG,WT+4*S,10*S,divDoorW+12*S,darkWood, 0,divDoorH+5*S,0);
+  const iDoor=makeGroup('bedroom_door_r'+roomIdx);
+  iDoor.position.set(divX,divDoorH/2,bdDoorCZ);
+  GB(iDoor,8*S,divDoorH-2*S,divDoorW-4*S,woodDoor, 0,0,0);
+  const iKnob=new THREE.Mesh(new THREE.SphereGeometry(4*S,8,8),brassMat);
+  iKnob.position.set(divX+side*5*S, divDoorH*0.45, bdDoorCZ-divDoorW/2+14*S); scene.add(iKnob);
+
+  // ══════════════════════════════════════════════════════════════════════
+  // BEDROOM  (back 42% — from divX to backWallX)
+  // Full height, full Z width of room
+  // ══════════════════════════════════════════════════════════════════════
+  const bdW   = Math.abs(backWallX - divX) - WT;   // bedroom X width
+  const bdCX  = divX + side * (Math.abs(backWallX-divX)/2);  // bedroom centre X
+
+  // Light
+  const bdLt=new THREE.PointLight(0xffddaa,0.85,bdW*2.5);
+  bdLt.position.set(bdCX,RH-20*S,rz); scene.add(bdLt);
+  const bdRose=new THREE.Mesh(new THREE.CylinderGeometry(13*S,13*S,3*S,12),
+    new THREE.MeshLambertMaterial({color:0xd4c8b4}));
+  bdRose.position.set(bdCX,RH-2*S,rz); scene.add(bdRose);
+  const bdChain=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,22*S,6),darkWood);
+  bdChain.position.set(bdCX,RH-13*S,rz); scene.add(bdChain);
+  const bdShade=new THREE.Mesh(new THREE.CylinderGeometry(13*S,8*S,17*S,12,1,true),
+    new THREE.MeshLambertMaterial({color:0xddcc88,transparent:true,opacity:0.85,side:THREE.DoubleSide}));
+  bdShade.position.set(bdCX,RH-30*S,rz); scene.add(bdShade);
+
+  // King size bed (3/4 scale) — headboard and bed as separate editable groups
+  const bedW=290*S, bedL=305*S;
+
+  // ── Headboard — separate group, flat against back wall ──
+  const hbG=makeGroup('headboard_r'+roomIdx);
+  hbG.position.set(backWallX - side*(WT+5*S), 0, rz);
+  GB(hbG, 10*S, 130*S, bedW+24*S, bedFrame,  0, 65*S, 0);  // outer frame
+  GB(hbG,  6*S, 108*S, bedW+4*S,  upholst,   0, 62*S, 0);  // upholstered centre
+  GB(hbG, 10*S,  12*S, bedW+24*S, bedFrame,  0,126*S, 0);  // top rail cap
+
+  // ── Bed frame + mattress — separate group ──
+  const bedHt=16*S, mattH=30*S;
+  const headX = backWallX - side*(WT+10*S+bedL/2);
+  const bedG=makeGroup('bed_r'+roomIdx);
+  bedG.position.set(headX, 0, rz);
+  // Low platform frame
+  GB(bedG, bedW+20*S, bedHt, bedL+20*S, bedFrame, 0, bedHt/2, 0);
+  // Legs at corners
+  [[-1,-1],[-1,1],[1,-1],[1,1]].forEach(([sx,sz])=>{
+    GB(bedG, 10*S, bedHt+4*S, 10*S, bedFrame, sx*(bedW/2+4*S), (bedHt+4*S)/2, sz*(bedL/2+4*S));
+  });
+  // Thick mattress
+  GB(bedG, bedW, mattH, bedL, mattress, 0, bedHt+mattH/2, 0);
+  // 4 pillows as separate editable groups (2 rows x 2 columns)
+  [[-bedW*0.22, 0],[ bedW*0.22, 0],[-bedW*0.22, 1],[ bedW*0.22, 1]].forEach(([pz,row],pi)=>{
+    const pG=makeGroup('pillow_r'+roomIdx+'_'+pi);
+    pG.position.set(headX - side*(bedL/2-30*S) - side*row*40*S, bedHt+mattH+5*S, rz+pz);
+    GB(pG, 56*S, 10*S, 34*S, pillow, 0, 5*S, 0);
+  });
+
+  // Bedside tables — north and south of bed
+  [-1,1].forEach((bs,bsi)=>{
+    const btZ=rz+bs*(bedW/2+24*S);
+    const btG=makeGroup('bedside_r'+roomIdx+'_'+bsi);
+    btG.position.set(headX, 0, btZ);
+    GB(btG,44*S,56*S,44*S,deskMat, 0,28*S,0);
+    GC(btG,5*S,7*S,8*S,10,brassMat, 0,58*S,0);
+    const lshd=new THREE.Mesh(new THREE.CylinderGeometry(13*S,8*S,18*S,12,1,true),
+      new THREE.MeshLambertMaterial({color:0xddcc88,transparent:true,opacity:0.8,side:THREE.DoubleSide}));
+    lshd.position.set(0,74*S,0); btG.add(lshd);
+    const lbulb=new THREE.Mesh(new THREE.SphereGeometry(4*S,8,8),
+      new THREE.MeshLambertMaterial({color:0xffeecc,emissive:0x664400}));
+    lbulb.position.set(0,71*S,0); btG.add(lbulb);
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // BATHROOM — northZ portion of bedroom, door from dividing wall
+  // ══════════════════════════════════════════════════════════════════════
+  const btDepth = RD * 0.38;  // bathroom takes 38% of room Z depth
+  const btSouthZ = northZ + btDepth;  // south wall of bathroom (shared with bedroom)
+  const btDoorW = 90*S, btDoorH = 220*S;
+  const btDoorZ = btSouthZ;  // door in dividing wall at bathroom/bedroom boundary
+
+  // Bathroom south wall (separates bathroom from bedroom)
+  const btWallSegX = Math.abs(backWallX - divX);
+  B(btWallSegX, RH, WT, wallMat).position.set(bdCX, RH/2, btSouthZ);
+
+  // Bathroom door opening in dividing wall (from living room side)
+  // Replace dividing wall segment near northZ with door opening
+
+  // Bathroom light
+  const btLt=new THREE.PointLight(0xffffff,1.0,btDepth*3);
+  btLt.position.set(bdCX, RH-20*S, northZ+btDepth*0.5); scene.add(btLt);
+  // Ceiling fixture
+  B(14*S,3*S,14*S,new THREE.MeshLambertMaterial({color:0xffffff,emissive:0x888888}))
+    .position.set(bdCX, RH-2*S, northZ+btDepth*0.5);
+
+  const porcelain = new THREE.MeshLambertMaterial({color:0x9a9a9a});
+  const chromeMat  = new THREE.MeshLambertMaterial({color:0x787878});
+  const insideMat  = new THREE.MeshLambertMaterial({color:0x707880});
+
+  // ── Toilet — against back wall, bigger ──
+  const tlG=makeGroup('toilet_r'+roomIdx);
+  tlG.position.set(backWallX-side*34*S, 0, northZ+46*S);
+  // Base/plinth
+  GB(tlG,52*S,10*S,60*S,porcelain,  0,5*S,0);
+  // Bowl
+  GB(tlG,50*S,22*S,55*S,porcelain,  0,21*S,3*S);
+  // Seat rim
+  GB(tlG,48*S,4*S,52*S,new THREE.MeshLambertMaterial({color:0x888888}), 0,34*S,3*S);
+  // Cistern against back wall
+  GB(tlG,44*S,50*S,18*S,porcelain,  0,33*S,-26*S);
+  // Cistern lid
+  GB(tlG,46*S,4*S,20*S,porcelain,   0,58*S,-26*S);
+  // Flush button
+  GC(tlG,4*S,4*S,3*S,8,chromeMat,   0,61*S,-26*S);
+
+  // ── Shower — corner by bathroom door (divX side, btSouthZ corner) ──
+  const shSize=100*S;
+  const shG=makeGroup('shower_r'+roomIdx);
+  const shCX = divX + side*(shSize/2);
+  const shCZ = btSouthZ - shSize/2;
+  shG.position.set(shCX, 0, shCZ);
+  const glassMat=new THREE.MeshLambertMaterial({color:0x99bbcc,transparent:true,opacity:0.25,side:THREE.DoubleSide});
+  const tileMat =new THREE.MeshLambertMaterial({color:0x888890});
+  // Shower tray
+  GB(shG, shSize, 5*S, shSize, tileMat, 0, 2.5*S, 0);
+  // Back wall (btSouthZ side)
+  GB(shG, shSize, RH*0.75, WT, tileMat, 0, RH*0.375, shSize/2);
+  // Side wall (backWallX side) — only if shower doesn't already touch it
+  GB(shG, WT, RH*0.75, shSize, tileMat, -side*shSize/2, RH*0.375, 0);
+  // Glass door panel (front, toward room)
+  GB(shG, shSize*0.6, RH*0.72, 5*S, glassMat, side*shSize*0.1, RH*0.36, -shSize/2);
+  // Glass side panel (divX side)
+  GB(shG, 5*S, RH*0.72, shSize*0.55, glassMat, side*shSize/2, RH*0.36, -shSize*0.12);
+  // Shower head on back wall
+  GC(shG, 2*S,2*S,60*S,8,chromeMat,  side*(-shSize/2+16*S), RH*0.62, shSize/2-WT);
+  GC(shG,14*S,14*S,4*S, 8,chromeMat, side*(-shSize/2+16*S), RH*0.62, shSize/2-WT-30*S);
+  // Tap/valve on side wall
+  GC(shG, 3*S,3*S,20*S,8,brassMat,   -side*(shSize/2-WT), RH*0.3, -shSize*0.1);
+  GB(shG, 16*S,3*S,3*S,  brassMat,   -side*(shSize/2-WT), RH*0.38,-shSize*0.1);
+
+  // ── Sink — counter vanity lengthways along back wall, mirror on back wall face ──
+  // vnL = length along Z (along wall), vnD = depth in X (sticking out from wall), vnH = height
+  const vnL=200*S, vnD=55*S, vnH=68*S;
+  const snG=makeGroup('sink_r'+roomIdx);
+  // Position: back wall edge of vanity flush with backWallX, centred in Z on bathroom
+  const vnCX = backWallX - side*(vnD/2 + WT);
+  const vnCZ = northZ + btDepth*0.5;
+  snG.position.set(vnCX, 0, vnCZ);
+  // Cabinet body — long in Z, shallow in X
+  GB(snG, vnD, vnH, vnL, new THREE.MeshLambertMaterial({color:0x3a2810}), 0, vnH/2, 0);
+  // Cabinet doors along the Z-facing front face (3 doors)
+  [-vnL*0.32, 0, vnL*0.32].forEach(dz=>{
+    GB(snG, 5*S, vnH-10*S, vnL*0.28, darkWood, -side*(vnD/2-3*S), vnH/2, dz);
+  });
+  // Door knobs
+  [-vnL*0.32, 0, vnL*0.32].forEach(dz=>{
+    GC(snG, 2*S,2*S,4*S,6, brassMat, -side*(vnD/2-7*S), vnH/2, dz);
+  });
+  // Counter top — slight overhang on front
+  GB(snG, vnD+6*S, 6*S, vnL+6*S, porcelain, 0, vnH+3*S, 0);
+  // Basin centred in counter (centred in Z and X)
+  GB(snG, vnD-10*S, 8*S, 60*S, porcelain, 0, vnH-1*S, 0);
+  GB(snG, vnD-20*S, 6*S, 48*S, insideMat, 0, vnH-2*S, 0);
+  // Tap riser (towards back wall side)
+  GC(snG, 2*S,2*S,16*S,8, brassMat, side*(vnD/2-10*S), vnH+10*S, 0);
+  // Hot/cold handles
+  [-12*S,12*S].forEach(tz=>{
+    GB(snG, 14*S,3*S,3*S, brassMat, side*(vnD/2-10*S), vnH+18*S, tz);
+  });
+  // Mirror flat against back wall — same length as vanity
+  const mirH=110*S;
+  GB(snG, 6*S, mirH+8*S, vnL+8*S, darkWood, side*(vnD/2+3*S), vnH+mirH/2+8*S, 0);
+  GB(snG, 4*S, mirH,     vnL,     new THREE.MeshLambertMaterial({color:0x7799aa,transparent:true,opacity:0.55}), side*(vnD/2+4*S), vnH+mirH/2+8*S, 0);
+
+  // ── Bathtub — along back wall, length runs in Z, sits away from wall in X ──
+  const tbL=160*S, tbW=75*S, tbH=40*S;  // length(Z) x width(X) x height
+  const tbG=makeGroup('bathtub_r'+roomIdx);
+  const tbZ = northZ + btDepth*0.5;
+  tbG.position.set(backWallX - side*(tbW/2+12*S), 0, tbZ);
+  // Outer shell
+  GB(tbG, tbW,      tbH,      tbL,      porcelain, 0, tbH/2,    0);
+  // Inner basin
+  GB(tbG, tbW-12*S, tbH-14*S, tbL-16*S, insideMat, 0, tbH-4*S,  0);
+  // Rim lip all around
+  GB(tbG, tbW+8*S,  5*S,      tbL+8*S,  new THREE.MeshLambertMaterial({color:0x888888}), 0, tbH+2*S, 0);
+  // Tap end wall (northZ side)
+  GB(tbG, tbW,      tbH-6*S,  10*S,     porcelain, 0, (tbH-6*S)/2, -(tbL/2+2*S));
+  // Foot end wall (southZ side)
+  GB(tbG, tbW,      tbH-10*S, 10*S,     porcelain, 0, (tbH-10*S)/2, tbL/2+2*S);
+  // Four feet
+  [[-tbW/2+8*S, -(tbL/2-14*S)],[tbW/2-8*S, -(tbL/2-14*S)],
+   [-tbW/2+8*S,  tbL/2-14*S  ],[tbW/2-8*S,  tbL/2-14*S  ]].forEach(([fx,fz])=>{
+    GC(tbG,6*S,5*S,14*S,10,chromeMat, fx,6*S,fz);
+    GC(tbG,8*S,8*S,2*S, 10,chromeMat, fx,0,  fz);
+  });
+  // Hot + cold taps on tap end
+  [-14*S,14*S].forEach(tx=>{
+    GC(tbG,3*S,3*S,22*S,8,brassMat,  tx,tbH+8*S,-(tbL/2));
+    GB(tbG,3*S,3*S,14*S, brassMat,   tx,tbH+20*S,-(tbL/2)-4*S);
+    GC(tbG,6*S,6*S,4*S, 8,chromeMat, tx,tbH+6*S, -(tbL/2));
+  });
+  // Spout (centre, arcs over basin)
+  GC(tbG,4*S,4*S,26*S,8,chromeMat,  0,tbH+10*S,-(tbL/2));
+  GB(tbG,4*S,4*S,22*S,chromeMat,    0,tbH+22*S,-(tbL/2)-8*S);
+  GC(tbG,5*S,5*S,5*S, 8,chromeMat,  0,tbH+22*S,-(tbL/2)-19*S);
+  // Drain (foot end)
+  GC(tbG,6*S,6*S,3*S, 12,chromeMat, 0,tbH-13*S, tbL/2-12*S);
+  GC(tbG,3*S,3*S,2*S, 12,new THREE.MeshLambertMaterial({color:0x222222}), 0,tbH-11*S, tbL/2-12*S);
+  // Overflow plate (tap end inner wall)
+  GB(tbG,3*S,18*S,14*S,chromeMat,   side*(-tbW/2+4*S), tbH-8*S, -(tbL/2-10*S));
+
+  // Wardrobe — moved to south end of bedroom (away from bathroom)
+  const wdZ=southZ-64*S;
+  const wdG=makeGroup('wardrobe_r'+roomIdx);
+  wdG.position.set(bdCX, 0, wdZ);
+  GB(wdG,58*S,RH*0.88,120*S,darkWood, 0,RH*0.44,0);
+  [-42*S,42*S].forEach(dz=>{
+    GB(wdG,5*S,RH*0.85,54*S,woodDoor,  30*S,RH*0.425,dz);
+    GB(wdG,5*S,RH*0.85,54*S,woodDoor, -30*S,RH*0.425,dz);
+  });
+
+  // Dressing table — against south side wall
+  const dtZ=southZ-36*S;
+  const dtG=makeGroup('dressingtable_r'+roomIdx);
+  dtG.position.set(bdCX, 0, dtZ);
+  GB(dtG,44*S,66*S,90*S,deskMat, 0,33*S,0);
+  GB(dtG,44*S,60*S,3*S,brassMat, 0,RH*0.48,40*S);
+
+  // Bedroom rug
+  const bdRug=makeGroup('bedroom_rug_r'+roomIdx);
+  bdRug.position.set(headX+side*20*S, 0, rz);
+  GB(bdRug,bedW+50*S,0.5*S,bedL+40*S,rugMats[roomIdx], 0,2.5*S,0);
+
+  // Painting above headboard on back wall
+  const bdPaintG=makeGroup('bedroom_painting_r'+roomIdx);
+  bdPaintG.position.set(headX-side*(bedL/2+3*S), 0, rz);
+  GB(bdPaintG,90*S,68*S,5*S,darkWood, 0,RH*0.62,0);
+  GB(bdPaintG,80*S,58*S,3*S,artMat,   side*2*S,RH*0.62,0);
+
+  // ══════════════════════════════════════════════════════════════════════
+  // LIVING / DINING  (front 58% — from doorWallX to divX)
+  // Full Z width of room
+  // ══════════════════════════════════════════════════════════════════════
+  const lvW   = Math.abs(divX - doorWallX) - WT;
+  const lvCX  = doorWallX + side * Math.abs(divX-doorWallX)/2;
+
+  // Chandelier
+  const lvLt=new THREE.PointLight(0xffddaa,1.0,lvW*3);
+  lvLt.position.set(lvCX,RH-20*S,rz); scene.add(lvLt);
+  const chCh=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,36*S,6),darkWood);
+  chCh.position.set(lvCX,RH-20*S,rz); scene.add(chCh);
+  const chBs=new THREE.Mesh(new THREE.CylinderGeometry(11*S,11*S,8*S,10),brassMat);
+  chBs.position.set(lvCX,RH-40*S,rz); scene.add(chBs);
+  [0,1,2,3,4].forEach(i=>{
+    const a=i*Math.PI*2/5, r=20*S;
+    const arm=B(r*2,3*S,3*S,brassMat); arm.rotation.y=a; arm.position.set(lvCX,RH-41*S,rz);
+    const gl=new THREE.Mesh(new THREE.SphereGeometry(4*S,8,8),
+      new THREE.MeshLambertMaterial({color:0xfffae0,emissive:0x664400}));
+    gl.position.set(lvCX+Math.cos(a)*r,RH-45*S,rz+Math.sin(a)*r); scene.add(gl);
+  });
+
+  // ── SOFA — against dividing wall, facing toward door ──
+  // Sofa back against divX wall, facing outward (toward corridor/door)
+  const sofCX = divX - side*50*S;
+  const sofW2 = RD * 0.18;
+  const sofD2=78*S, sofH2=40*S, bkH2=46*S;
+  const sofaG=makeGroup('sofa_r'+roomIdx);
+  sofaG.position.set(sofCX, 0, rz);
+  GB(sofaG,sofD2,sofH2,sofW2,upholst, 0,sofH2/2,0);
+  GB(sofaG,12*S,bkH2,sofW2,upholst, side*(sofD2/2-6*S),sofH2/2+bkH2/2,0);
+  [-1,1].forEach(s2=>{ GB(sofaG,sofD2,bkH2,12*S,upholst, 0,sofH2/2+bkH2/2,s2*(sofW2/2+6*S)); });
+  [[-sofD2/2,sofW2/2],[-sofD2/2,-sofW2/2],[sofD2/2,sofW2/2],[sofD2/2,-sofW2/2]].forEach(([lx,lz])=>{
+    GC(sofaG,3*S,3*S,9*S,8,darkWood,lx,4*S,lz);
+  });
+
+  // ── COFFEE TABLE — between sofa and door wall ──
+  const ctCX = sofCX - side*60*S;
+  const ctG=makeGroup('coffee_table_r'+roomIdx);
+  ctG.position.set(ctCX,0,rz);
+  GB(ctG,70*S,7*S,120*S,deskMat,    0,45*S,0);
+  [[-26*S,-44*S],[26*S,-44*S],[-26*S,44*S],[26*S,44*S]].forEach(([lx,lz])=>{
+    GB(ctG,6*S,42*S,6*S,darkWood,   lx,21*S,lz);
+  });
+  GC(ctG,9*S,11*S,12*S,10,new THREE.MeshLambertMaterial({color:0x8a5a3a}), 0,54*S,0);
+
+  // ── TWO ARMCHAIRS — flanking coffee table, facing sofa ──
+  [-1,1].forEach((s2,ai)=>{
+    const acZ=rz+s2*(sofW2/2-36*S);
+    const acG=makeGroup('armchair_r'+roomIdx+'_'+ai);
+    acG.position.set(ctCX-side*20*S, 0, acZ);
+    // Rotate to face toward dividing wall (toward sofa)
+    acG.rotation.y = side < 0 ? Math.PI/2 : -Math.PI/2;
+    GB(acG,74*S,40*S,74*S,upholst, 0,20*S,0);
+    GB(acG,74*S,50*S,12*S,upholst, 0,58*S,35*S);
+    [-1,1].forEach(s3=>{ GB(acG,12*S,42*S,74*S,upholst,s3*41*S,30*S,0); });
+    [[-28*S,-26*S],[28*S,-26*S],[-28*S,26*S],[28*S,26*S]].forEach(([lx,lz])=>{
+      GC(acG,3*S,3*S,9*S,8,darkWood,lx,4*S,lz);
+    });
+  });
+
+  // Living area rug — editable
+  const lvRugG=makeGroup('living_rug_r'+roomIdx);
+  lvRugG.position.set(lvCX,0,rz);
+  GB(lvRugG,lvW*0.7,0.5*S,RD*0.3,rugMats[roomIdx], 0,2.5*S,0);
+
+  // ── DINING TABLE — in north portion of living area ──
+  // Placed away from bedroom door (south side = near bedroom door, so put dining in north half)
+  const dinZ = northZ + RD*0.28;
+  const dinCX = lvCX;
+  const dinG=makeGroup('dining_table_r'+roomIdx);
+  dinG.position.set(dinCX,0,dinZ);
+  GB(dinG,200*S,7*S,110*S,deskMat,    0,84*S,0);
+  [[-76*S,-36*S],[76*S,-36*S],[-76*S,36*S],[76*S,36*S]].forEach(([lx,lz])=>{
+    GB(dinG,7*S,80*S,7*S,darkWood,       lx,40*S,lz);
+  });
+  // Candle centrepiece
+  GC(dinG,4*S,5*S,17*S,8,new THREE.MeshLambertMaterial({color:0xf0f0e0}), 0,94*S,0);
+  const cfl=new THREE.Mesh(new THREE.SphereGeometry(3*S,6,6),
+    new THREE.MeshLambertMaterial({color:0xff8800,emissive:0x442200}));
+  cfl.position.set(dinCX,110*S,dinZ); scene.add(cfl);
+
+  // 4 dining chairs
+  [[-1,0],[1,0],[0,-1],[0,1]].forEach(([dx,dz],di)=>{
+    if(dx===0 && Math.abs(dz)===1){
+      // north/south chairs
+      const dG=makeGroup('dchair_r'+roomIdx+'_'+di);
+      dG.position.set(dinCX, 0, dinZ+dz*62*S);
+      dG.rotation.y = dz > 0 ? Math.PI : 0;
+      GB(dG,48*S,5*S,44*S,upholst,  0,50*S,0);
+      GB(dG,48*S,38*S,5*S,upholst,  0,70*S,22*S);
+      [[-16*S,-14*S],[16*S,-14*S],[-16*S,14*S],[16*S,14*S]].forEach(([lx,lz])=>{
+        GB(dG,4*S,48*S,4*S,darkWood,lx,24*S,lz);
+      });
+    } else {
+      // east/west chairs
+      const dG=makeGroup('dchair_r'+roomIdx+'_'+di);
+      dG.position.set(dinCX+dx*62*S, 0, dinZ);
+      dG.rotation.y = dx*side > 0 ? Math.PI/2 : -Math.PI/2;
+      GB(dG,48*S,5*S,44*S,upholst,  0,50*S,0);
+      GB(dG,48*S,38*S,5*S,upholst,  0,70*S,22*S);
+      [[-16*S,-14*S],[16*S,-14*S],[-16*S,14*S],[16*S,14*S]].forEach(([lx,lz])=>{
+        GB(dG,4*S,48*S,4*S,darkWood,lx,24*S,lz);
+      });
+    }
+  });
+
+  // ── BOOKSHELF — proper bookcase against south wall ──
+  const bsW=100*S, bsH=140*S, bsD=28*S, bsThk=4*S;
+  const bshZ=southZ-WT-bsD/2;
+  const bshG=makeGroup('bookshelf_r'+roomIdx);
+  bshG.position.set(lvCX, 0, bshZ);
+  const bkColors=[0x8a3a2a,0x2a5a8a,0x3a7a4a,0x7a6a2a,0x6a2a7a,0x4a6a8a,0x8a6a2a,0xaa4422,0x226688,0x447733,0x885522];
+  GB(bshG, bsW, bsH, bsThk*0.5, darkWood, 0, bsH/2, -bsD/2+bsThk*0.25); // back
+  GB(bshG, bsThk, bsH, bsD, darkWood, -bsW/2+bsThk/2, bsH/2, 0); // left side
+  GB(bshG, bsThk, bsH, bsD, darkWood,  bsW/2-bsThk/2, bsH/2, 0); // right side
+  GB(bshG, bsW, bsThk, bsD, darkWood, 0, bsThk/2, 0); // bottom
+  GB(bshG, bsW+3*S, bsThk*1.5, bsD+2*S, darkWood, 0, bsH-bsThk, 0); // top cap
+  const bsShelfYs=[bsH*0.27, bsH*0.52, bsH*0.76];
+  bsShelfYs.forEach((sy,si)=>{
+    GB(bshG, bsW-bsThk*2, bsThk, bsD-2*S, deskMat, 0, sy, 0);
+    const slotBottom=sy+bsThk/2;
+    const slotTop=(si<bsShelfYs.length-1?bsShelfYs[si+1]:bsH-bsThk)-2*S;
+    const maxBH=slotTop-slotBottom;
+    let bx=-bsW/2+bsThk+3*S; let bi=si*5+roomIdx*3;
+    while(bx<bsW/2-bsThk-6*S){
+      const bw=(5+(bi%4)*2)*S, bh=Math.min((10+(bi%5)*5)*S,maxBH);
+      if(bx+bw>bsW/2-bsThk-3*S) break;
+      GB(bshG,bw,bh,bsD-6*S,new THREE.MeshLambertMaterial({color:bkColors[bi%bkColors.length]}),bx+bw/2,slotBottom+bh/2,0);
+      bx+=bw+2*S; bi++;
+    }
+  });
+  // Top shelf books
+  { const slotBottom=bsShelfYs[2]+bsThk/2, maxBH=bsH-bsThk-slotBottom-2*S;
+    let bx=-bsW/2+bsThk+3*S; let bi=roomIdx*7+15;
+    while(bx<bsW/2-bsThk-6*S){
+      const bw=(5+(bi%4)*2)*S, bh=Math.min((10+(bi%5)*5)*S,maxBH);
+      if(bx+bw>bsW/2-bsThk-3*S) break;
+      GB(bshG,bw,bh,bsD-6*S,new THREE.MeshLambertMaterial({color:bkColors[bi%bkColors.length]}),bx+bw/2,slotBottom+bh/2,0);
+      bx+=bw+2*S; bi++;
+    }
+  }
+
+  // ── KITCHEN AREA — against north wall of living room ──
+  const kitchenZ = northZ + WT + 20*S; // against north wall
+  const kitchenX = lvCX + side * 30*S; // offset from centre toward back wall
+  const counterMat = new THREE.MeshLambertMaterial({color:0xc8c0b0}); // light stone worktop
+  const cabinetMat = new THREE.MeshLambertMaterial({color:0x5a3a1a}); // dark wood cabinets
+  const applianceMat = new THREE.MeshLambertMaterial({color:0x888888}); // stainless
+  const handleMat = new THREE.MeshLambertMaterial({color:0xaaaaaa});
+
+  // ── LOWER COUNTER UNIT (3 cabinet bays) ──
+  const counterG = makeGroup('kitchen_counter_r'+roomIdx);
+  counterG.position.set(kitchenX, 0, kitchenZ);
+  // Counter top
+  GB(counterG, 160*S, 4*S, 38*S, counterMat, 0, 88*S, 0);
+  // Worktop overhang front edge strip
+  GB(counterG, 162*S, 3*S, 2*S, new THREE.MeshLambertMaterial({color:0xb0a898}), 0, 87*S, 20*S);
+  // 3 base cabinet carcasses
+  [-48*S, 0, 48*S].forEach((ox, ci) => {
+    GB(counterG, 50*S, 84*S, 36*S, cabinetMat, ox, 42*S, 0);
+    // Cabinet door panel
+    GB(counterG, 44*S, 74*S, 3*S, new THREE.MeshLambertMaterial({color:0x7a5a2a}), ox, 42*S, 19*S);
+    // Door handle
+    GB(counterG, 2*S, 2*S, 18*S, handleMat, ox+16*S, 50*S, 21*S);
+  });
+  // Kickboard
+  GB(counterG, 160*S, 8*S, 6*S, new THREE.MeshLambertMaterial({color:0x3a2010}), 0, 4*S, 17*S);
+
+  // ── UPPER WALL CABINETS ──
+  const upperCabG = makeGroup('kitchen_upper_r'+roomIdx);
+  upperCabG.position.set(kitchenX, 0, kitchenZ);
+  // 3 upper cabinet carcasses
+  [-48*S, 0, 48*S].forEach((ox, ci) => {
+    GB(upperCabG, 50*S, 60*S, 28*S, cabinetMat, ox, RH*0.72, -4*S);
+    // Upper door panel
+    GB(upperCabG, 44*S, 52*S, 3*S, new THREE.MeshLambertMaterial({color:0x7a5a2a}), ox, RH*0.72, 10*S);
+    // Upper door handle
+    GB(upperCabG, 2*S, 2*S, 14*S, handleMat, ox+14*S, RH*0.65, 12*S);
+  });
+  // Under-cabinet strip light
+  GB(upperCabG, 158*S, 2*S, 2*S, new THREE.MeshLambertMaterial({color:0xffeecc, emissive:0x553300}), 0, RH*0.56, 10*S);
+
+  // ── SINK in middle counter bay ──
+  const sinkG = makeGroup('kitchen_sink_r'+roomIdx);
+  sinkG.position.set(kitchenX, 0, kitchenZ);
+  // Sink basin
+  GB(sinkG, 36*S, 8*S, 28*S, applianceMat, 0, 86*S, -1*S);
+  GB(sinkG, 30*S, 6*S, 22*S, new THREE.MeshLambertMaterial({color:0x555555}), 0, 90*S, -1*S);
+  // Tap base
+  GC(sinkG, 2*S, 2*S, 14*S, 8, handleMat, 0, 96*S, -8*S);
+  GB(sinkG, 12*S, 2*S, 2*S, handleMat, 0, 109*S, -8*S);
+  GC(sinkG, 2*S, 2*S, 6*S, 8, handleMat, 6*S, 105*S, -8*S);
+
+  // ── FRIDGE — beside counter, against north wall ──
+  const fridgeG = makeGroup('fridge_r'+roomIdx);
+  fridgeG.position.set(kitchenX - side*100*S, 0, kitchenZ + 2*S);
+  const fridgeMat = new THREE.MeshLambertMaterial({color:0x909090});
+  // Main body
+  GB(fridgeG, 54*S, 180*S, 40*S, fridgeMat, 0, 90*S, 0);
+  // Freezer top door
+  GB(fridgeG, 50*S, 56*S, 3*S, new THREE.MeshLambertMaterial({color:0x808080}), 0, 148*S, 21*S);
+  // Fridge bottom door
+  GB(fridgeG, 50*S, 110*S, 3*S, new THREE.MeshLambertMaterial({color:0x808080}), 0, 68*S, 21*S);
+  // Freezer handle
+  GB(fridgeG, 32*S, 3*S, 3*S, handleMat, 0, 120*S, 23*S);
+  // Fridge handle
+  GB(fridgeG, 32*S, 3*S, 3*S, handleMat, 0, 120*S-60*S, 23*S);
+  // Hinge strip
+  GB(fridgeG, 3*S, 180*S, 3*S, new THREE.MeshLambertMaterial({color:0x606060}), -24*S, 90*S, 20*S);
+  // Logo panel
+  GB(fridgeG, 20*S, 6*S, 1*S, new THREE.MeshLambertMaterial({color:0x444444}), 8*S, 148*S, 23*S);
+
+
+
+  // ── TV STAND ──
+  const tvStandG = makeGroup('tv_stand_r'+roomIdx);
+  tvStandG.position.set(doorWallX + side*22*S, 0, rz);
+  GB(tvStandG, 160*S, 40*S, 40*S, darkWood, 0, 20*S, 0);
+  [-38*S, 38*S].forEach(ox=>{
+    GB(tvStandG, 70*S, 32*S, 3*S, new THREE.MeshLambertMaterial({color:0x7a5a2a}), ox, 20*S, 21*S);
+    GB(tvStandG, 2*S, 2*S, 14*S, new THREE.MeshLambertMaterial({color:0xaaaaaa}), ox+22*S, 22*S, 23*S);
+  });
+  [[-72*S,-14*S],[72*S,-14*S],[-72*S,14*S],[72*S,14*S]].forEach(([lx,lz])=>{
+    GB(tvStandG, 6*S, 8*S, 6*S, darkWood, lx, 4*S, lz);
+  });
+
+  // ── TV ──
+  const tvG = makeGroup('tv_r'+roomIdx);
+  tvG.position.set(doorWallX + side*22*S, 0, rz);
+  GB(tvG, 150*S, 88*S, 6*S, new THREE.MeshLambertMaterial({color:0x111111}), 0, 88*S, 0);
+  GB(tvG, 138*S, 76*S, 2*S, new THREE.MeshLambertMaterial({color:0x1a2a3a, emissive:0x0a1020}), 0, 88*S, 4*S);
+  GB(tvG, 150*S, 4*S, 6*S, new THREE.MeshLambertMaterial({color:0x222222}), 0, 45*S, 0);
+  GB(tvG, 8*S, 8*S, 8*S, new THREE.MeshLambertMaterial({color:0x333333}), 0, 42*S, 0);
+  tvG.rotation.y = side > 0 ? Math.PI : 0;
+  tvStandG.rotation.y = side > 0 ? Math.PI : 0;
+  const pDoor1=makePainting('paint_door1_r'+roomIdx, 80*S, 55*S, SVG_CIRCLES);
+  pDoor1.position.set(doorWallX+side*7*S, RH*0.62, northZ+RD*0.25);
+  pDoor1.rotation.y=side>0?0:Math.PI;
+
+  const pDoor2=makePainting('paint_door2_r'+roomIdx, 80*S, 55*S, SVG_BRUSHSTROKES);
+  pDoor2.position.set(doorWallX+side*7*S, RH*0.62, southZ-RD*0.25);
+  pDoor2.rotation.y=side>0?0:Math.PI;
+
+  // ── PAINTINGS & DECORATIONS ──
+
+  // Unique art colours per room
+  const artColors=[
+    [0x8a4a2a,0x3a6a9a,0x4a8a5a], // room 0 — warm earth, steel blue, sage
+    [0x7a3a6a,0x9a7a2a,0x3a5a7a], // room 1 — plum, gold, slate
+    [0x2a6a5a,0x9a4a2a,0x6a6a2a], // room 2 — teal, terracotta, olive
+    [0x5a2a7a,0x2a7a5a,0x8a5a2a], // room 3 — purple, emerald, amber
+    [0x7a2a3a,0x2a5a8a,0x4a7a4a], // room 4 — crimson, navy, forest
+    [0x3a4a7a,0x8a3a4a,0x6a7a2a], // room 5 — indigo, rose, lime
+  ];
+  const ac=artColors[roomIdx%6];
+  const art0=new THREE.MeshLambertMaterial({color:ac[0]});
+  const art1=new THREE.MeshLambertMaterial({color:ac[1]});
+  const art2=new THREE.MeshLambertMaterial({color:ac[2]});
+
+  // Living room — large painting on north wall (faces south, no rotation needed)
+  const pg0=makePainting('paint_lv_north_r'+roomIdx, 90*S, 60*S, SVG_WARM_FIELDS, art0);
+  pg0.position.set(lvCX, RH*0.65, northZ+WT+7*S);
+
+  // Living room — smaller painting on south wall (faces north, rotate 180)
+  const pg1=makePainting('paint_lv_south_r'+roomIdx, 70*S, 45*S, SVG_OCEAN_DEPTH, art1);
+  pg1.position.set(lvCX, RH*0.63, southZ-WT-7*S);
+  pg1.rotation.y=Math.PI;
+
+  // Living room — wall clock on back wall of living area
+  const clkG=makeGroup('clock_r'+roomIdx);
+  clkG.position.set(backWallX-side*2*S, 0, lvCX+30*S);
+  GC(clkG,18*S,18*S,4*S,16,new THREE.MeshLambertMaterial({color:0xf0ece0}), 0,RH*0.78,0);
+  GC(clkG,16*S,16*S,2*S,16,darkWood, 0,RH*0.78,1*S);
+  // Clock hands
+  GB(clkG,2*S,10*S,2*S,new THREE.MeshLambertMaterial({color:0x111111}), 0,RH*0.78+5*S,2*S);
+  GB(clkG,2*S,14*S,2*S,new THREE.MeshLambertMaterial({color:0x111111}), 3*S,RH*0.78,2*S);
+
+  // Living room — decorative vase on bookshelf area / corner
+  const vaseG=makeGroup('vase_r'+roomIdx);
+  vaseG.position.set(lvCX-side*40*S, 0, southZ-30*S);
+  GC(vaseG,6*S,10*S,8*S, 12,new THREE.MeshLambertMaterial({color:ac[2]}), 0,4*S,0);  // base
+  GC(vaseG,10*S,6*S,20*S,12,new THREE.MeshLambertMaterial({color:ac[2]}), 0,18*S,0); // body
+  GC(vaseG,6*S,10*S,6*S, 12,new THREE.MeshLambertMaterial({color:ac[2]}), 0,32*S,0); // neck
+  // Flower stems
+  [-6*S,0,6*S].forEach((fx,fi)=>{
+    GC(vaseG,1*S,1*S,24*S,6,new THREE.MeshLambertMaterial({color:0x3a6a2a}), fx,46*S,0);
+    GC(vaseG,5*S,5*S,4*S, 8,new THREE.MeshLambertMaterial({color:[0xdd4466,0xffcc00,0xff6633][fi]}), fx,60*S,0);
+  });
+
+  // Living room — small decorative pot plant near window
+  const plantG=makeGroup('plant_r'+roomIdx);
+  plantG.position.set(doorWallX+side*12*S, 0, northZ+20*S);
+  GC(plantG,10*S,8*S,18*S, 8,new THREE.MeshLambertMaterial({color:0x8a5a2a}), 0,9*S,0);  // pot
+  GC(plantG,18*S,4*S,6*S,  8,new THREE.MeshLambertMaterial({color:0x7a5a1a}), 0,19*S,0); // soil
+  GC(plantG,22*S,22*S,28*S,10,new THREE.MeshLambertMaterial({color:0x2a6a1a}), 0,36*S,0); // foliage
+  GC(plantG,14*S,14*S,18*S,10,new THREE.MeshLambertMaterial({color:0x1a5a0a}), 8*S,44*S,6*S);
+
+  // Living room — LARGE floor plant in corner near south wall
+  const floorPlantG=makeGroup('floorplant_r'+roomIdx);
+  floorPlantG.position.set(lvCX+side*50*S, 0, southZ-28*S);
+  GC(floorPlantG,14*S,12*S,32*S, 10,new THREE.MeshLambertMaterial({color:0x6a3a18}), 0,16*S,0); // big terracotta pot
+  GC(floorPlantG,22*S,6*S,10*S,  10,new THREE.MeshLambertMaterial({color:0x5a2e10}), 0,34*S,0); // soil rim
+  // Multiple large leaf clusters
+  GC(floorPlantG,30*S,30*S,50*S,12,new THREE.MeshLambertMaterial({color:0x1a6a0a}), 0,64*S,0);
+  GC(floorPlantG,20*S,20*S,40*S,10,new THREE.MeshLambertMaterial({color:0x0a5a00}), 14*S,72*S,10*S);
+  GC(floorPlantG,18*S,18*S,36*S,10,new THREE.MeshLambertMaterial({color:0x2a7a0a}), -12*S,68*S,8*S);
+  GC(floorPlantG,14*S,14*S,28*S, 8,new THREE.MeshLambertMaterial({color:0x1a5a0a}),  8*S,80*S,-10*S);
+  // Tall cane stems
+  [-8*S,0,8*S].forEach((sx,si)=>{
+    GC(floorPlantG,2*S,2*S,60*S,6,new THREE.MeshLambertMaterial({color:0x3a6a1a}), sx,58*S,si*4*S);
+  });
+
+  // Living room — another big painting on south wall
+  const pg1b=makePainting('paint_lv_south2_r'+roomIdx, 108*S, 63*S, SVG_NIGHT_BLOOM, art2);
+  pg1b.position.set(lvCX, RH*0.72, southZ-WT-7*S);
+  pg1b.rotation.y=Math.PI;
+
+  // Living room — FAMILY PHOTO WALL (cluster of small frames on back wall)
+  const r6Portraits=[SVG_GRAN,SVG_KIDS,SVG_CHRISTMAS];
+  const photoColors=[0x8a7a6a,0x7a8a9a,0x9a8a6a,0x6a8a7a,0x8a6a7a,0x7a6a8a,0x9a7a5a,0x6a7a8a,0x8a8a6a];
+  // ox = spread left/right along the back wall (X axis), oy = height
+  const photoLayouts=[
+    [-60*S, RH*0.75, 42*S, 32*S],
+    [-20*S, RH*0.78, 36*S, 46*S],
+    [ 20*S, RH*0.74, 42*S, 32*S],
+    [ 60*S, RH*0.72, 38*S, 30*S],
+    [-55*S, RH*0.48, 30*S, 40*S],
+    [-15*S, RH*0.50, 48*S, 36*S],
+    [ 25*S, RH*0.47, 36*S, 48*S],
+    [ 62*S, RH*0.50, 32*S, 36*S],
+    [-40*S, RH*0.25, 38*S, 28*S],
+    [  5*S, RH*0.23, 34*S, 42*S],
+    [ 45*S, RH*0.26, 32*S, 30*S],
+  ];
+  photoLayouts.forEach(([ox,oy,fw,fh],pi)=>{
+    const svgStr=r6Portraits[pi%3];
+    const flatMat=svgStr?null:new THREE.MeshLambertMaterial({color:photoColors[pi%9]});
+    const fpG=makePainting('familyphoto_r'+roomIdx+'_'+pi, fw, fh, svgStr, flatMat);
+    fpG.position.set(backWallX-side*7*S+ox, oy, rz);
+    fpG.rotation.y=side>0?Math.PI:0;
+  });
+
+  // Bedroom — painting above dresser on south wall
+  const pg2=makePainting('paint_bd_south_r'+roomIdx, 60*S, 40*S, null, art2);
+  pg2.position.set(bdCX, RH*0.6, southZ-WT-7*S);
+  pg2.rotation.y=Math.PI;
+
+  // Bedroom — pair of small framed prints on dividing wall (bedroom side)
+  [-20*S,20*S].forEach((oz,pi)=>{
+    const pgG=makePainting('print_bd_r'+roomIdx+'_'+pi, 28*S, 38*S, null, new THREE.MeshLambertMaterial({color:ac[pi]}));
+    pgG.position.set(divX+side*7*S, RH*0.6, rz+oz*2);
+    pgG.rotation.y=side>0?Math.PI:0;
+  });
+
+  // Bedroom — LARGE painting on north wall
+  const pg3=makePainting('paint_bd_north_r'+roomIdx, 108*S, 78*S, null, art0);
+  pg3.position.set(bdCX, RH*0.62, northZ+WT+7*S);
+
+  // Bedroom — large painting on south wall beside wardrobe
+  const pg4=makePainting('paint_bd_south2_r'+roomIdx, 68*S, 88*S, null, art1);
+  pg4.position.set(bdCX, RH*0.75, southZ-WT-7*S);
+  pg4.position.z-=30*S;
+  pg4.rotation.y=Math.PI;
+
+  // ── ROOM 6 EXTRA PAINTINGS on living room walls ──
+  // ── EXTRA PAINTINGS on living room walls (all rooms) ──
+  // Desert Canyon — dividing wall, living room side
+  const pEx1=makePainting('paint_ex1_r'+roomIdx, 94*S, 64*S, SVG_DESERT_CANYON);
+  pEx1.position.set(divX+side*7*S, RH*0.68, rz-80*S);
+  pEx1.rotation.y=side>0?Math.PI:0;
+
+  // Stormy Sea — south wall lower area
+  const pEx2=makePainting('paint_ex2_r'+roomIdx, 102*S, 68*S, SVG_STORMY_SEA);
+  pEx2.position.set(lvCX, RH*0.45, southZ-WT-7*S);
+  pEx2.rotation.y=Math.PI;
+
+  // Moonlit Mountain — back wall other side
+  const pEx3=makePainting('paint_ex3_r'+roomIdx, 112*S, 78*S, SVG_MOONLIT_MOUNTAIN);
+  pEx3.position.set(backWallX-side*7*S, RH*0.55, rz-80*S);
+  pEx3.rotation.y=side>0?Math.PI:0;
+
+  // Autumn Grove — north wall lower area
+  const pEx4=makePainting('paint_ex4_r'+roomIdx, 82*S, 58*S, SVG_AUTUMN_GROVE);
+  pEx4.position.set(lvCX, RH*0.42, northZ+WT+7*S);
+  pEx4.position.z+=40*S;
+
+  // Colour Blocks — dividing wall lower
+  const pEx5=makePainting('paint_ex5_r'+roomIdx, 88*S, 60*S, SVG_COLOUR_BLOCKS);
+  pEx5.position.set(divX+side*7*S, RH*0.38, rz+80*S);
+  pEx5.rotation.y=side>0?Math.PI:0;
+
+  // ── FAMILY PHOTOS — south wall cluster (all rooms) ──
+  const famPhotos=[
+    [SVG_BIRTHDAY,  -80*S, RH*0.55, 68*S, 52*S],
+    [SVG_WEDDING,   -15*S, RH*0.57, 52*S, 68*S],
+    [SVG_PET,        50*S, RH*0.54, 56*S, 48*S],
+    [SVG_BEACH,     -75*S, RH*0.30, 72*S, 56*S],
+    [SVG_GRAN,       -5*S, RH*0.28, 50*S, 64*S],
+    [SVG_KIDS,       58*S, RH*0.31, 64*S, 52*S],
+  ];
+  famPhotos.forEach(([svg,oz,oy,fw,fh],fi)=>{
+    const fpG=makePainting('famphoto_ex_r'+roomIdx+'_'+fi, fw, fh, svg);
+    fpG.position.set(lvCX, oy, southZ-WT-7*S+oz);
+    fpG.rotation.y=Math.PI;
+  });
+
+  // Bedroom — bedside lamp glow spheres (decorative light)
+  [-1,1].forEach((bs,bsi)=>{
+    const btZ=rz+bs*(290*S/2+24*S);
+    const deco=new THREE.Mesh(new THREE.SphereGeometry(3*S,8,8),
+      new THREE.MeshLambertMaterial({color:0xffeecc,emissive:0x553300}));
+    deco.position.set(headX,71*S,btZ); scene.add(deco);
+  });
+
+  // Living room — wall sconce lights (decorative brackets on back wall)
+  [northZ+RD*0.15, southZ-RD*0.15].forEach((wz,wi)=>{
+    const scG=makeGroup('sconce_lv_r'+roomIdx+'_'+wi);
+    scG.position.set(backWallX-side*2*S, 0, wz);
+    GB(scG, 4*S,6*S,14*S, brassMat, 0,RH*0.72,0);   // bracket arm
+    GC(scG,8*S,5*S,14*S,10,new THREE.MeshLambertMaterial({color:0xddcc88,transparent:true,opacity:0.8,side:THREE.DoubleSide}), 0,RH*0.72+10*S,0); // shade
+    const sl=new THREE.PointLight(0xffcc88,0.5,120);
+    sl.position.set(backWallX-side*10*S,RH*0.72+10*S,wz); scene.add(sl);
+  });
+
+}
+
+
+// ── EXIT ──
+const exitCooldown=(new URLSearchParams(window.location.search).get('from')==='floor1')?Date.now()+3000:0;
+
+function checkExitDoor(){
+  if(exitTriggered)return; if(Date.now()<exitCooldown)return;
+  nearExit=Math.abs(camera.position.z)<DW && camera.position.x<HW/2+WT+50*S && camera.position.x>HW/2;
+  const hint=document.getElementById('doorHint');
+  if(hint)hint.style.display=nearExit?'block':'none';
+}
+
+function updateRoomLabel(){
+  let label='';
+  ROOM_ZS.forEach((rz,i)=>{
+    if(Math.abs(camera.position.z-rz)<RD/2+HW/2){
+      if(camera.position.x<-HW/2) label=ROOM_NAMES[i];
+      else if(camera.position.x>HW/2) label=ROOM_NAMES[i+3];
+    }
+  });
+  const el=document.getElementById('roomLabel');
+  if(label){el.textContent=label;el.style.display='block';}
+  else el.style.display='none';
+}
+
+function updateRotation(){camera.rotation.order='YXZ';camera.rotation.set(0,yaw,0);}
+
+// ── SHIFT+C COPY PAINTING ──
+let _toast=null;
+function getToast(){
+  if(!_toast){
+    _toast=document.createElement('div');
+    _toast.style.cssText='position:fixed;bottom:120px;left:50%;transform:translateX(-50%);padding:10px 22px;background:rgba(0,0,0,0.88);color:#aaffaa;border-radius:8px;font-size:15px;display:none;z-index:200;font-family:system-ui,Arial,sans-serif;pointer-events:none;';
+    document.body.appendChild(_toast);
+  }
+  return _toast;
+}
+function showToast(msg){
+  const t=getToast();
+  t.textContent=msg; t.style.display='block';
+  clearTimeout(t._tid); t._tid=setTimeout(()=>t.style.display='none',2500);
+}
+
+function tryCopyNearestPainting(){
+  if(!selectedObj){ showToast('Select a painting in Edit Mode first'); return; }
+  const orig=selectedObj;
+
+  // Find the SVG for this object
+  const svgStr=_svgRegistry[orig.userData.editId];
+
+  const newId='picopy_'+(Date.now());
+  const g=new THREE.Group();
+  g.userData={editId:newId};
+
+  if(svgStr){
+    // Rebuild from SVG — find the frame dimensions from the original
+    let fw=100*S, fh=70*S;
+    orig.traverse(ch=>{
+      if(ch.isMesh&&ch.geometry){
+        const p=ch.geometry.parameters;
+        if(p&&p.width&&p.height&&p.width>fw){ fw=p.width; fh=p.height; }
+      }
+    });
+    // Frame
+    const frame=new THREE.Mesh(new THREE.BoxGeometry(fw+12*S,fh+12*S,6*S),darkWood.clone());
+    g.add(frame);
+    // Fresh texture plane
+    const plane=new THREE.Mesh(new THREE.PlaneGeometry(fw,fh),makeSVGTexture(svgStr));
+    plane.position.z=4*S;
+    g.add(plane);
+    _svgRegistry[newId]=svgStr;
+  } else {
+    // Non-SVG object — deep clone with cloned materials
+    orig.traverse(ch=>{
+      if(ch.isMesh){
+        const m=new THREE.Mesh(ch.geometry,ch.material.clone());
+        m.position.copy(ch.position);
+        m.rotation.copy(ch.rotation);
+        g.add(m);
+      }
+    });
+  }
+
+  // Place it slightly offset from original
+  g.position.set(orig.position.x+12*S, orig.position.y, orig.position.z+12*S);
+  g.rotation.copy(orig.rotation);
+  scene.add(g);
+  editableObjects.push(g);
+  selectObj(g);
+  showToast('✓ Copied — move with arrow keys');
+}
+
+function onKeyDown(e){
+  if(e.code==='KeyC'&&e.shiftKey){ e.preventDefault(); tryCopyNearestPainting(); return; }
+  if(e.code==='KeyM'){ toggleEdit(); return; }
+  if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+  if(e.code==='KeyE'&&nearExit&&!exitTriggered&&!EDIT_MODE){
+    exitTriggered=true;
+    document.getElementById('doorHint').style.display='none';
+    document.getElementById('exitFade').classList.add('show');
+    if(window.SoundSystem)SoundSystem.play('doorOpen');
+    setTimeout(()=>window.location.href='livingquarters.html?door=5',600);
+    return;
+  }
+  if(EDIT_MODE&&selectedObj){
+    const step=5*S,rot=Math.PI/12;
+    if(e.code==='ArrowLeft'){e.preventDefault();selectedObj.position.x-=step;}
+    if(e.code==='ArrowRight'){e.preventDefault();selectedObj.position.x+=step;}
+    if(e.code==='ArrowUp'&&!e.shiftKey){e.preventDefault();selectedObj.position.z-=step;}
+    if(e.code==='ArrowDown'&&!e.shiftKey){e.preventDefault();selectedObj.position.z+=step;}
+    if(e.code==='ArrowUp'&&e.shiftKey){e.preventDefault();selectedObj.position.y+=step;}
+    if(e.code==='ArrowDown'&&e.shiftKey){e.preventDefault();selectedObj.position.y-=step;}
+    if(e.code==='KeyR')selectedObj.rotation.y+=rot;
+    if(e.code==='Escape')deselect();
+    if(e.code==='Delete'||e.code==='Backspace'){
+      selectedObj.userData._deleted=true;
+      scene.remove(selectedObj);
+      deselect();
+    }
+    updateSelInfo(); return;
+  }
+  if(EDIT_MODE)return;
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=true;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=true;
+  if(e.code==='ArrowLeft')turnLeft=true;
+  if(e.code==='ArrowRight')turnRight=true;
+}
+function onKeyUp(e){
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=false;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=false;
+  if(e.code==='ArrowLeft')turnLeft=false;
+  if(e.code==='ArrowRight')turnRight=false;
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const delta=(performance.now()-prevTime)/1000; prevTime=performance.now();
+  if(turnLeft)yaw+=2.2*delta; if(turnRight)yaw-=2.2*delta;
+  const mv=Number(moveForward)-Number(moveBackward);
+  if(mv!==0&&window.SoundSystem)SoundSystem.footstep();
+  const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  camera.position.x+=fwd.x*mv*55*delta;
+  camera.position.z+=fwd.z*mv*55*delta;
+  // Clamp to room + corridor bounds
+  const corrLen=150*S;
+  camera.position.x=Math.max(HW/2-10*S, Math.min(HW/2+RW-20*S, camera.position.x));
+  camera.position.z=Math.max(-RD/2+20*S, Math.min(RD/2-20*S,    camera.position.z));
+  // Allow corridor access when near the door
+  if(camera.position.x < HW/2+60*S) camera.position.z=Math.min(corrLen+WT, camera.position.z);
+  camera.position.y=180*S;
+  checkExitDoor(); updateRoomLabel(); updateRotation(); renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+// init called after engine loads
+
+// ===== RIGHT-SIDE DROPDOWN MENU (matches floor1) =====
+function getRightMenu(){
+  let wrap=document.getElementById('rightMenuWrap');
+  if(wrap) return wrap;
+  wrap=document.createElement('div');
+  wrap.id='rightMenuWrap';
+  wrap.style.position='fixed';
+  wrap.style.top='58px';
+  wrap.style.right='10px';
+  wrap.style.zIndex='120';
+  wrap.style.fontFamily='system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif';
+  const btn=document.createElement('button');
+  btn.id='rightMenuBtn'; btn.type='button'; btn.textContent='☰ Menu';
+  btn.style.padding='8px 12px';
+  btn.style.borderRadius='10px';
+  btn.style.border='1px solid rgba(255,255,255,0.25)';
+  btn.style.background='rgba(0,0,0,0.72)';
+  btn.style.color='#eee';
+  btn.style.cursor='pointer';
+  const panel=document.createElement('div');
+  panel.id='rightMenuPanel';
+  panel.style.marginTop='8px';
+  panel.style.display='none';
+  panel.style.padding='10px';
+  panel.style.borderRadius='12px';
+  panel.style.border='1px solid rgba(255,255,255,0.18)';
+  panel.style.background='rgba(0,0,0,0.80)';
+  panel.style.minWidth='240px';
+  panel.style.boxShadow='0 10px 30px rgba(0,0,0,0.35)';
+  btn.onclick=()=>{ panel.style.display=(panel.style.display==='none')?'block':'none'; };
+  document.addEventListener('pointerdown',(e)=>{ if(!wrap.contains(e.target)) panel.style.display='none'; },{capture:true});
+  wrap.appendChild(btn); wrap.appendChild(panel); document.body.appendChild(wrap);
+  return wrap;
+}
+function addToRightMenu(el){
+  getRightMenu();
+  const panel=document.getElementById('rightMenuPanel');
+  if(!panel||!el) return;
+  el.style.display='block'; el.style.width='100%'; el.style.margin='6px 0';
+  panel.appendChild(el);
+}
+{
+  const editBtn=document.getElementById('editBtn');
+  const saveBtn=document.getElementById('saveBtn');
+  const loadBtn=document.getElementById('loadBtn');
+  const indicator=document.getElementById('editIndicator');
+  if(editBtn){ editBtn.addEventListener('click',toggleEdit); addToRightMenu(editBtn); }
+  if(indicator) addToRightMenu(indicator);
+  if(saveBtn){ saveBtn.addEventListener('click',saveLayout); addToRightMenu(saveBtn); }
+  if(loadBtn){ loadBtn.addEventListener('click',loadLayout); addToRightMenu(loadBtn); }
+  // snapshot dropdown
+  (function(){
+    const _idxK=SAVE_KEY+'_snap_index';
+    const sel=document.createElement('select');
+    sel.id='snapshotSelect';
+    sel.style.cssText='padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:rgba(0,0,0,0.72);color:#eee;cursor:pointer;font-family:system-ui,Arial,sans-serif;font-size:12px;';
+    function refresh(){
+      const list=JSON.parse(localStorage.getItem(_idxK)||'[]');
+      sel.innerHTML='';
+      if(!list.length){const o=document.createElement('option');o.textContent='No snapshots yet';sel.appendChild(o);return;}
+      list.forEach(k=>{const o=document.createElement('option');o.value=k;o.textContent=k;sel.appendChild(o);});
+    }
+    sel.onchange=()=>{
+      const key=sel.value;if(!key)return;
+      const raw=localStorage.getItem(key);if(!raw)return;
+      let p;try{p=JSON.parse(raw);}catch(e){return;}
+      const arr=Array.isArray(p)?p:(p.layout||[]);
+      const del=Array.isArray(p)?[]:(p.deleted||[]);
+      arr.forEach(d=>{const obj=editableObjects.find(o=>o.userData.editId===d.id);if(obj){obj.position.set(d.px,d.py,d.pz);obj.rotation.y=d.ry;}});
+      del.forEach(id=>{const obj=editableObjects.find(o=>o.userData.editId===id);if(obj){obj.userData._deleted=true;scene.remove(obj);}});
+      showAutoStatus('🔁 Loaded snapshot',true);
+    };
+    // seed index from legacy SAVE_KEY if nothing indexed yet
+    (function(){
+      const _idxK2=SAVE_KEY+'_snap_index';
+      const existing=JSON.parse(localStorage.getItem(_idxK2)||'[]');
+      if(!existing.length){
+        const legacy=localStorage.getItem(SAVE_KEY);
+        if(legacy){
+          const legacyKey=SAVE_KEY+'_legacy';
+          localStorage.setItem(legacyKey,legacy);
+          localStorage.setItem(_idxK2,JSON.stringify([legacyKey]));
+        }
+      }
+    })();
+    refresh();
+    addToRightMenu(sel);
+  })();
+}
+// editLight click toggles edit mode
+const _editLightEl=document.getElementById('editLight');
+if(_editLightEl) _editLightEl.addEventListener('click',toggleEdit);
+</script>
+<script src="../../floor1/sound-system.js"></script>
+<script src="../../floor1/mystery-engine.js"></script>
+<script src="../../floor1/mystery-state.js"></script>
+<script src="../../floor1/mystery-ui.js"></script>
+<script src="../../floor1/evidence-system.js"></script>
+<script>
+(async () => {
+  await MysteryEngine.init();
+  let scenario = await MysteryState.load();
+  const isNew = !scenario;
+  if (isNew) { scenario = MysteryEngine.generate(); await MysteryState.save(scenario); }
+  window._scenario = scenario;
+  MysteryUI.init(scenario, isNew);
+  MysteryUI.setZone('lq_room1');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'lq_room1' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

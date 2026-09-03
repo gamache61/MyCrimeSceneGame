@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Lord & Lady Crowsnest — Master Bedroom</title>
+<style>
+#exitFade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9999;transition:opacity 0.6s ease;}
+#exitFade.show{opacity:1;}
+#instructionLine{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:8px 16px;font-size:14px;color:#eee;background:rgba(0,0,0,0.6);border-radius:6px;z-index:30;pointer-events:none;white-space:nowrap;}
+body{margin:0;overflow:hidden;background:#000;font-family:Arial,sans-serif;}
+canvas{display:block;}
+#fadeOverlay{position:fixed;inset:0;background:#000;z-index:9999;animation:fadeOut 0.8s ease forwards;}
+@keyframes fadeOut{from{opacity:1;}to{opacity:0;}}
+#editHud{position:fixed;top:58px;left:50%;transform:translateX(-50%);z-index:60;display:flex;gap:8px;align-items:center;font-family:system-ui,Arial,sans-serif;}
+#editBtn,#saveBtn,#loadBtn,#clearBtn{padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:rgba(0,0,0,0.72);color:#eee;cursor:pointer;user-select:none;}
+#editIndicator{padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(255,255,255,0.20);background:rgba(80,20,20,0.8);color:#ffd0d0;}
+#editIndicator.on{background:rgba(20,80,20,0.85);color:#d5ffd5;}
+#autoStatus{position:fixed;top:108px;left:50%;transform:translateX(-50%);padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.65);color:#d7f7d7;font:12px/1.35 system-ui,Arial;display:none;z-index:70;pointer-events:none;white-space:nowrap;}
+#selInfo{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:8px 18px;background:rgba(0,0,0,0.8);color:#aaddff;border-radius:8px;font-size:13px;display:none;z-index:60;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit &nbsp; M = Edit Mode</div>
+<div id="doorHint" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#e8c87a;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(200,160,60,0.4);">Press E — Return to Floor 2</div>
+<div id="closetHint" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#e8c87a;border-radius:8px;font-size:17px;display:none;z-index:51;font-family:Georgia,serif;border:1px solid rgba(200,160,60,0.4);">Press E — Walk-in Closet</div>
+<div id="balconyHint" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#a8e8ff;border-radius:8px;font-size:17px;display:none;z-index:52;font-family:Georgia,serif;border:1px solid rgba(100,180,255,0.4);">Press E — Step onto Balcony</div>
+<div id="fadeOverlay"></div>
+<div id="editHud">
+  <button id="editBtn" type="button">Edit Mode</button>
+  <button id="saveBtn" type="button">Save Layout</button>
+  <button id="loadBtn" type="button">Load Layout</button>
+  <button id="clearBtn" type="button">Clear Save</button>
+  <div id="editIndicator">OFF</div>
+</div>
+<div id="autoStatus"></div>
+<div id="selInfo"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+const FLOOR_ID = "lord_ladies";
+const STORAGE_KEY = FLOOR_ID + "_layout";
+
+let scene, camera, renderer;
+let moveForward=false, moveBackward=false, turnLeft=false, turnRight=false;
+let yaw=0, prevTime=performance.now();
+const S=0.5;
+// Large room — 1.8x wider and 1.6x deeper than standard
+const RW=1200*S*1.8*0.75, RD=1000*S*1.6*0.75, RH=500*S;
+
+// ── Edit system ──
+let EDIT_MODE = false;
+let selectedObject = null;
+const editableObjects = [];
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+let _isDirty = false;
+function markEdited(){ _isDirty = true; }
+
+function setEditId(obj, id){
+  if(!obj.userData) obj.userData={};
+  if(!obj.userData.editId) obj.userData.editId=String(id);
+}
+let _editCounter=0;
+function addGroup(group, idHint){
+  setEditId(group, idHint||("grp_"+(++_editCounter)));
+  editableObjects.push(group);
+  scene.add(group);
+  return group;
+}
+
+function showAutoStatus(msg,ok=true){
+  const el=document.getElementById("autoStatus");
+  if(!el) return;
+  el.style.display="block"; el.style.color=ok?"#d7f7d7":"#ffd7d7"; el.textContent=msg;
+  setTimeout(()=>{el.style.display="none";},2200);
+}
+function updateEditUI(){
+  const ind=document.getElementById("editIndicator");
+  ind.textContent=EDIT_MODE?"ON":"OFF"; ind.classList.toggle("on",EDIT_MODE);
+  const btn=document.getElementById("editBtn");
+  btn.textContent=EDIT_MODE?"✏️ Edit Mode: ON":"Edit Mode: OFF";
+  btn.style.background=EDIT_MODE?"rgba(20,80,20,0.85)":"rgba(0,0,0,0.72)";
+  btn.style.color=EDIT_MODE?"#d5ffd5":"#eee";
+}
+function toggleEditMode(){
+  EDIT_MODE=!EDIT_MODE;
+  if(!EDIT_MODE){selectedObject=null;document.getElementById("selInfo").style.display="none";}
+  updateEditUI();
+}
+function saveLayout(){
+  const objects=editableObjects.map(o=>{
+    const wp=new THREE.Vector3(); o.getWorldPosition(wp);
+    const wq=new THREE.Quaternion(); o.getWorldQuaternion(wq);
+    return {id:o.userData.editId,position:{x:wp.x,y:wp.y,z:wp.z},quaternion:{x:wq.x,y:wq.y,z:wq.z,w:wq.w},scale:{x:o.scale.x,y:o.scale.y,z:o.scale.z}};
+  });
+  localStorage.setItem(STORAGE_KEY,JSON.stringify({version:1,savedAt:Date.now(),objects}));
+  _isDirty=false; showAutoStatus("✅ Layout saved",true);
+}
+function loadLayout(){
+  const json=localStorage.getItem(STORAGE_KEY);
+  if(!json){showAutoStatus("No saved layout found",false);return;}
+  try{
+    const d=JSON.parse(json);
+    for(const e of d.objects){
+      const o=editableObjects.find(x=>x.userData.editId===e.id);
+      if(!o) continue;
+      // Set world position (objects are direct scene children so local=world)
+      o.position.set(e.position.x,e.position.y,e.position.z);
+      o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);
+      o.scale.set(e.scale.x,e.scale.y,e.scale.z);
+    }
+    showAutoStatus("✅ Layout loaded",true);
+  }catch(e){showAutoStatus("Load failed: "+e.message,false);}
+}
+function clearAutoSave(){localStorage.removeItem(STORAGE_KEY);showAutoStatus("🗑 Save cleared",true);}
+
+function onMouseClick(e){
+  if(!EDIT_MODE) return;
+  const rect=renderer.domElement.getBoundingClientRect();
+  mouse.x=((e.clientX-rect.left)/rect.width)*2-1;
+  mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;
+  raycaster.setFromCamera(mouse,camera);
+  const meshes=[];
+  editableObjects.forEach(o=>{
+    if(o.isMesh) meshes.push(o);
+    else o.traverse(ch=>{if(ch.isMesh) meshes.push(ch);});
+  });
+  const hits=raycaster.intersectObjects(meshes,false);
+  if(!hits.length){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}
+  // Walk up ancestry until we find the editable root
+  let obj=hits[0].object;
+  let cur=obj;
+  while(cur){
+    if(editableObjects.includes(cur)){obj=cur;break;}
+    cur=cur.parent;
+  }
+  if(!editableObjects.includes(obj)){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}
+  selectedObject=obj;
+  const eid=obj.userData&&obj.userData.editId?obj.userData.editId:"object";
+  const si=document.getElementById("selInfo");
+  si.style.display="block";
+  si.textContent=`✏️ Selected: ${eid} | Arrows=Move  Shift+↑↓=Height  R=Rotate  Del=Delete`;
+  showAutoStatus("Selected: "+eid,true);
+}
+
+function onKeyDown(e){
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code)) e.preventDefault();
+  if(e.code==="KeyM"){toggleEditMode();return;}
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if(e.code==="KeyE"){
+    if(nearBalcony&&!balconyTriggered){
+      balconyTriggered=true;
+      document.getElementById("balconyHint").style.display="none";
+      document.getElementById("exitFade").classList.add("show");
+      setTimeout(()=>window.location.href="balcony.html?from=lord_ladiesroom",600);
+      return;
+    }
+    if(nearCloset&&!closetTriggered){
+      closetTriggered=true;
+      document.getElementById("closetHint").style.display="none";
+      document.getElementById("exitFade").classList.add("show");
+      setTimeout(()=>window.location.href="walkin-closet.html?from=lord_ladiesroom",600);
+      return;
+    }
+    if(nearExit&&!exitTriggered){
+      exitTriggered=true;
+      document.getElementById("doorHint").style.display="none";
+      document.getElementById("exitFade").classList.add("show");
+      setTimeout(()=>window.location.href="../../floor2/floor2.html?from=lord&ladiesroom",600);
+      return;
+    }
+  }
+  if(EDIT_MODE&&selectedObject){
+    // Delete selected object
+    if(e.code==="Delete"||e.code==="Backspace"){
+      e.preventDefault();
+      scene.remove(selectedObject);
+      const idx=editableObjects.indexOf(selectedObject);
+      if(idx>-1) editableObjects.splice(idx,1);
+      showAutoStatus("🗑 Deleted: "+selectedObject.userData.editId,true);
+      selectedObject=null;
+      document.getElementById("selInfo").style.display="none";
+      markEdited();
+      return;
+    }
+    const speed=e.shiftKey?1:8; let moved=false;
+    if(!e.shiftKey){
+      if(e.code==="ArrowUp")   {selectedObject.position.z-=speed;moved=true;}
+      if(e.code==="ArrowDown") {selectedObject.position.z+=speed;moved=true;}
+      if(e.code==="ArrowLeft") {selectedObject.position.x-=speed;moved=true;}
+      if(e.code==="ArrowRight"){selectedObject.position.x+=speed;moved=true;}
+    }
+    if(e.shiftKey&&e.code==="ArrowUp")  {selectedObject.position.y+=speed;moved=true;}
+    if(e.shiftKey&&e.code==="ArrowDown"){selectedObject.position.y-=speed;moved=true;}
+    if(e.code==="KeyR"){selectedObject.rotation.y+=e.shiftKey?0.05:0.1;moved=true;}
+    if(moved){markEdited();return;}
+  }
+  if(!EDIT_MODE){
+    if(e.code==="KeyW"||e.code==="ArrowUp")   moveForward=true;
+    if(e.code==="KeyS"||e.code==="ArrowDown") moveBackward=true;
+    if(e.code==="ArrowLeft")  turnLeft=true;
+    if(e.code==="ArrowRight") turnRight=true;
+  }
+}
+function onKeyUp(e){
+  if(e.code==="KeyW"||e.code==="ArrowUp")   moveForward=false;
+  if(e.code==="KeyS"||e.code==="ArrowDown") moveBackward=false;
+  if(e.code==="ArrowLeft")  turnLeft=false;
+  if(e.code==="ArrowRight") turnRight=false;
+}
+
+// ── SVG Picture System ──
+function makeSVGTexture(svgString){
+  try{
+    const b64=btoa(unescape(encodeURIComponent(svgString)));
+    const url='data:image/svg+xml;base64,'+b64;
+    const mat=new THREE.MeshLambertMaterial({transparent:false,color:0xffffff,side:THREE.DoubleSide});
+    new THREE.TextureLoader().load(url,function(tex){tex.encoding=THREE.sRGBEncoding;mat.map=tex;mat.needsUpdate=true;});
+    return mat;
+  }catch(e){return new THREE.MeshLambertMaterial({color:0x4a3a2a,side:THREE.DoubleSide});}
+}
+
+const SVG_PORTRAIT_LORD=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 300" width="220" height="300"><rect width="220" height="300" fill="#b8a888"/><rect x="0" y="210" width="220" height="90" fill="#7a6848"/><circle cx="110" cy="85" r="40" fill="#d4a870"/><ellipse cx="110" cy="70" rx="34" ry="28" fill="#c49060" opacity="0.4"/><rect x="78" y="122" width="64" height="130" fill="#1a2a4a" rx="3"/><ellipse cx="110" cy="122" rx="36" ry="14" fill="#1a2a4a"/><rect x="58" y="126" width="22" height="90" fill="#1a2a4a" rx="3"/><rect x="140" y="126" width="22" height="90" fill="#1a2a4a" rx="3"/><circle cx="97" cy="82" r="4.5" fill="#3a2010"/><circle cx="123" cy="82" r="4.5" fill="#3a2010"/><path d="M96 96 Q110 106 124 96" fill="none" stroke="#3a2010" stroke-width="2" stroke-linecap="round"/><rect x="86" y="38" width="48" height="10" fill="#2a1a08" opacity="0.6" rx="3"/><rect x="92" y="26" width="10" height="16" fill="#c8a030" opacity="0.8"/><rect x="118" y="28" width="10" height="14" fill="#c8a030" opacity="0.7"/><rect x="95" y="118" width="30" height="6" fill="#d4a820" opacity="0.7"/></svg>`;
+
+const SVG_PORTRAIT_LADY=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 300" width="220" height="300"><rect width="220" height="300" fill="#c0b0a0"/><rect x="0" y="210" width="220" height="90" fill="#8a7868"/><circle cx="110" cy="78" r="36" fill="#e8c8a0"/><rect x="82" y="111" width="56" height="145" fill="#2a5a3a" rx="4"/><ellipse cx="110" cy="111" rx="30" ry="11" fill="#2a5a3a"/><ellipse cx="110" cy="256" rx="52" ry="40" fill="#2a5a3a"/><rect x="60" y="116" width="24" height="82" fill="#2a5a3a" rx="4"/><rect x="136" y="116" width="24" height="82" fill="#2a5a3a" rx="4"/><circle cx="100" cy="75" r="4" fill="#3a2010"/><circle cx="120" cy="75" r="4" fill="#3a2010"/><path d="M99 88 Q110 98 121 88" fill="none" stroke="#3a2010" stroke-width="2" stroke-linecap="round"/><rect x="98" y="22" width="8" height="13" fill="#e8c040" opacity="0.8"/><rect x="116" y="24" width="8" height="11" fill="#e8c040" opacity="0.7"/><ellipse cx="100" cy="104" rx="9" ry="5" fill="#e8d0f0" opacity="0.8"/><ellipse cx="120" cy="104" rx="9" ry="5" fill="#e8d0f0" opacity="0.8"/></svg>`;
+
+const SVG_LANDSCAPE=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#78a8d0"/><rect x="0" y="0" width="300" height="110" fill="#88b8e0"/><ellipse cx="60" cy="30" rx="50" ry="20" fill="#d8e8f8" opacity="0.7"/><ellipse cx="200" cy="20" rx="65" ry="18" fill="#d8e8f8" opacity="0.6"/><rect x="0" y="100" width="300" height="120" fill="#5a8a3a"/><ellipse cx="80" cy="110" rx="35" ry="28" fill="#3a6a28"/><ellipse cx="220" cy="115" rx="40" ry="30" fill="#2a5a20"/><rect x="140" y="80" width="12" height="30" fill="#5a3a18"/><ellipse cx="146" cy="75" rx="20" ry="18" fill="#2a5a20"/><rect x="40" y="130" width="60" height="40" fill="#c0a070"/><rect x="58" y="140" width="14" height="30" fill="#6a4a28"/></svg>`;
+
+const SVG_CASTLE=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 220" width="300" height="220"><rect width="300" height="220" fill="#8ab0d0"/><rect x="0" y="0" width="300" height="110" fill="#6090b8"/><rect x="0" y="140" width="300" height="80" fill="#4a6a3a"/><rect x="0" y="130" width="300" height="18" fill="#5a7a45" opacity="0.8"/><rect x="60" y="60" width="180" height="90" fill="#c0b090"/><rect x="55" y="48" width="20" height="30" fill="#b0a080"/><rect x="105" y="35" width="20" height="40" fill="#b0a080"/><rect x="155" y="30" width="20" height="45" fill="#b0a080"/><rect x="205" y="42" width="20" height="35" fill="#b0a080"/><rect x="130" y="110" width="40" height="40" fill="#6a5a40"/><rect x="138" y="118" width="12" height="20" fill="#1a1208" opacity="0.7"/><ellipse cx="30" cy="80" rx="18" ry="22" fill="#5a7a4a"/><ellipse cx="270" cy="90" rx="22" ry="18" fill="#4a6a3a"/></svg>`;
+
+function makePicture(w,h,svgStr,id){
+  const g=new THREE.Group();
+  const border=10*S;
+  const frame=new THREE.Mesh(new THREE.BoxGeometry(w+border*2,h+border*2,10*S),
+    new THREE.MeshLambertMaterial({color:0xd4a820,polygonOffset:true,polygonOffsetFactor:1,polygonOffsetUnits:1}));
+  g.add(frame);
+  const lip=new THREE.Mesh(new THREE.BoxGeometry(w+border,h+border,11*S),
+    new THREE.MeshLambertMaterial({color:0x5a4010,polygonOffset:true,polygonOffsetFactor:2,polygonOffsetUnits:2}));
+  lip.position.z=0.5*S; g.add(lip);
+  const canvas=new THREE.Mesh(new THREE.PlaneGeometry(w,h),makeSVGTexture(svgStr));
+  canvas.position.z=8*S; g.add(canvas);
+  addGroup(g,id);
+  return g;
+}
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById("fadeOverlay");if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x0a0806);
+  scene.fog=new THREE.Fog(0x0a0806,400,2000);
+  camera=new THREE.PerspectiveCamera(72,window.innerWidth/window.innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Warm candlelit lighting — much brighter
+  scene.add(new THREE.AmbientLight(0x3a2a1a,1.5));
+  const c1=new THREE.PointLight(0xffd090,2.5,1200); c1.position.set(0,RH-40*S,0); scene.add(c1);
+  const fireGlow=new THREE.PointLight(0xff6600,2.5,500); fireGlow.position.set(0,80*S,-RD/2+60*S); scene.add(fireGlow);
+  const fire2=new THREE.PointLight(0xff4400,1.5,300); fire2.position.set(0,50*S,-RD/2+40*S); scene.add(fire2);
+  const lamp1=new THREE.PointLight(0xffcc66,1.8,400); lamp1.position.set(-RW/2+150*S,200*S,0); scene.add(lamp1);
+  const lamp2=new THREE.PointLight(0xffcc66,1.8,400); lamp2.position.set(RW/2-150*S,200*S,0); scene.add(lamp2);
+  const bedsideL=new THREE.PointLight(0xffaa44,1.5,300); bedsideL.position.set(-200*S,150*S,-100*S); scene.add(bedsideL);
+  const bedsideR=new THREE.PointLight(0xffaa44,1.5,300); bedsideR.position.set(200*S,150*S,-100*S); scene.add(bedsideR);
+  const fillLight=new THREE.PointLight(0xffd090,1.2,1500); fillLight.position.set(0,RH/2,0); scene.add(fillLight);
+
+  buildRoom();
+
+  // Auto-load saved layout after world is built
+  const _saved=localStorage.getItem(STORAGE_KEY);
+  if(_saved){
+    try{
+      const d=JSON.parse(_saved);
+      for(const e of d.objects){
+        const o=editableObjects.find(x=>x.userData.editId===e.id);
+        if(!o) continue;
+        o.position.set(e.position.x,e.position.y,e.position.z);
+        o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);
+        o.scale.set(e.scale.x,e.scale.y,e.scale.z);
+      }
+    }catch(err){console.warn("Auto-load failed:",err);}
+  }
+
+  document.getElementById("editBtn").addEventListener("click",toggleEditMode);
+  document.getElementById("saveBtn").addEventListener("click",saveLayout);
+  document.getElementById("loadBtn").addEventListener("click",loadLayout);
+  document.getElementById("clearBtn").addEventListener("click",clearAutoSave);
+  renderer.domElement.addEventListener("click",onMouseClick);
+  document.addEventListener("keydown",onKeyDown);
+  document.addEventListener("keyup",onKeyUp);
+  window.addEventListener("resize",onResize);
+
+  // Spawn position — near closet door if returning from walkin closet
+  const _from=new URLSearchParams(window.location.search).get("from");
+  if(_from==="lord_ladiesroom"){
+    camera.position.set(RW/2-120*S,240*S,-RD/2+150*S);
+    yaw=Math.PI/2;
+  } else if(_from==="balcony"){
+    camera.position.set(RW/2-120*S,240*S,0);
+    yaw=Math.PI;
+  } else {
+    camera.position.set(0,240*S,RD/2-150*S);
+    yaw=0;
+  }
+  updateRotation(); animate();
+}
+
+function buildRoom(){
+  // ── Materials ──
+  const wallMat   =new THREE.MeshLambertMaterial({color:0x3a2a1e});
+  const floorMat  =new THREE.MeshLambertMaterial({color:0x1a0e06});
+  const ceilMat   =new THREE.MeshLambertMaterial({color:0x1a1008});
+  const darkWood  =new THREE.MeshLambertMaterial({color:0x100804});
+  const midWood   =new THREE.MeshLambertMaterial({color:0x2a1408});
+  const richWood  =new THREE.MeshLambertMaterial({color:0x4a2010});
+  const brassMat  =new THREE.MeshLambertMaterial({color:0xb8860b});
+  const goldMat   =new THREE.MeshLambertMaterial({color:0xd4a820});
+  const marbleMat =new THREE.MeshLambertMaterial({color:0xd8d0c0});
+  const darkMarble=new THREE.MeshLambertMaterial({color:0x2a2420});
+  const ironMat   =new THREE.MeshLambertMaterial({color:0x1a1818});
+  const emberMat  =new THREE.MeshLambertMaterial({color:0xff4400,emissive:0xaa2200,emissiveIntensity:1.0});
+  const creamMat  =new THREE.MeshLambertMaterial({color:0xddd0b0});
+  const plasterMat=new THREE.MeshLambertMaterial({color:0xc8bea8});
+  const velvetRed =new THREE.MeshLambertMaterial({color:0x5a0808});
+  const velvetBurg=new THREE.MeshLambertMaterial({color:0x4a0a20});
+  const silkBlue  =new THREE.MeshLambertMaterial({color:0x1a2a4a});
+  const glassMat  =new THREE.MeshLambertMaterial({color:0x88aacc,transparent:true,opacity:0.3,side:THREE.DoubleSide});
+
+  // ── Parquet floor ──
+  const tileA=new THREE.MeshLambertMaterial({color:0x2a1a0c});
+  const tileB=new THREE.MeshLambertMaterial({color:0x1e1208});
+  const tSz=40*S;
+  for(let ix=0;ix<Math.ceil(RW/tSz);ix++)
+    for(let iz=0;iz<Math.ceil(RD/tSz);iz++){
+      const m=(ix+iz)%2===0?tileA:tileB;
+      const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-1,1.5*S,tSz-1),m);
+      t.position.set(-RW/2+tSz*(ix+0.5),0.5*S,-RD/2+tSz*(iz+0.5)); scene.add(t);
+    }
+
+  // ── Ceiling with cornice ──
+  const ceil=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),ceilMat);
+  ceil.rotation.x=Math.PI/2; ceil.position.y=RH; scene.add(ceil);
+  [[new THREE.BoxGeometry(RW+20*S,18*S,20*S),0,RH-9*S,-RD/2+10*S],
+   [new THREE.BoxGeometry(RW+20*S,18*S,20*S),0,RH-9*S, RD/2-10*S],
+   [new THREE.BoxGeometry(20*S,18*S,RD),     -RW/2+10*S,RH-9*S,0],
+   [new THREE.BoxGeometry(20*S,18*S,RD),      RW/2-10*S,RH-9*S,0],
+  ].forEach(([geo,x,y,z])=>{const m=new THREE.Mesh(geo,plasterMat);m.position.set(x,y,z);scene.add(m);});
+  // Ceiling rose
+  const rose=new THREE.Mesh(new THREE.CylinderGeometry(50*S,50*S,5*S,24),plasterMat);
+  rose.position.set(0,RH-2.5*S,0); scene.add(rose);
+  // Pendant chandelier
+  const chain=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,70*S,8),brassMat);
+  chain.position.set(0,RH-43*S,0); scene.add(chain);
+  const chanBase=new THREE.Mesh(new THREE.CylinderGeometry(12*S,12*S,18*S,12),goldMat);
+  chanBase.position.set(0,RH-92*S,0); scene.add(chanBase);
+  [50*S,32*S,16*S].forEach((r,ri)=>{
+    const ring=new THREE.Mesh(new THREE.TorusGeometry(r,2.5*S,8,24),goldMat);
+    ring.rotation.x=Math.PI/2; ring.position.set(0,RH-96*S-ri*18*S,0); scene.add(ring);
+    const arms=ri===0?8:ri===1?6:4;
+    for(let i=0;i<arms;i++){
+      const a=i*Math.PI*2/arms;
+      const globe=new THREE.Mesh(new THREE.SphereGeometry(5*S,8,8),
+        new THREE.MeshLambertMaterial({color:0xfffae0,emissive:0x664400}));
+      globe.position.set(Math.cos(a)*r,RH-98*S-ri*18*S,Math.sin(a)*r); scene.add(globe);
+    }
+  });
+
+  // ── Walls ──
+  const backWall=new THREE.Mesh(new THREE.BoxGeometry(RW,RH,16*S),wallMat);
+  backWall.position.set(0,RH/2,-RD/2+8*S); scene.add(backWall);
+  const leftWall=new THREE.Mesh(new THREE.BoxGeometry(16*S,RH,RD),wallMat);
+  leftWall.position.set(-RW/2+8*S,RH/2,0); scene.add(leftWall);
+  const rightWall=leftWall.clone(); rightWall.position.x=RW/2-8*S; scene.add(rightWall);
+  const doorGapW=216*S*2;
+  const fSideW=(RW-doorGapW)/2;
+  const fL=new THREE.Mesh(new THREE.BoxGeometry(fSideW,RH,16*S),wallMat);
+  fL.position.set(-(doorGapW/2+fSideW/2),RH/2,RD/2-8*S); scene.add(fL);
+  const fR=fL.clone(); fR.position.x=doorGapW/2+fSideW/2; scene.add(fR);
+  // Dado rail
+  [[new THREE.BoxGeometry(RW+20*S,10*S,18*S),0,120*S,-RD/2+9*S],
+   [new THREE.BoxGeometry(18*S,10*S,RD),-RW/2+9*S,120*S,0],
+   [new THREE.BoxGeometry(18*S,10*S,RD), RW/2-9*S,120*S,0],
+  ].forEach(([geo,x,y,z])=>{const m=new THREE.Mesh(geo,richWood);m.position.set(x,y,z);scene.add(m);});
+
+  // ── Double doors — full ceiling height ──
+  const dW=200*S, dH=RH, dThick=8*S, JAMB=20*S;
+  const doorZ=RD/2-6*S;
+  const doorMat=new THREE.MeshLambertMaterial({color:0x6b3a1f});
+  const doorPanel=new THREE.MeshLambertMaterial({color:0x8b4e28});
+  const frameMat2=new THREE.MeshLambertMaterial({color:0xc8a46e});
+  // Side frames
+  [-1,1].forEach(s=>{
+    const frameSide=new THREE.Mesh(new THREE.BoxGeometry(JAMB,dH,dThick+6*S),frameMat2);
+    frameSide.position.set(s*(dW+JAMB/2),dH/2,doorZ); scene.add(frameSide);
+    const door=new THREE.Mesh(new THREE.BoxGeometry(dW,dH,dThick),doorMat);
+    door.position.set(s*dW/2,dH/2,doorZ); scene.add(door);
+    [dH*0.12,dH*0.35,dH*0.58,dH*0.80].forEach(py=>{
+      const pnl=new THREE.Mesh(new THREE.BoxGeometry(dW-28*S,dH*0.16,4*S),doorPanel);
+      pnl.position.set(s*dW/2,py,doorZ+3*S); scene.add(pnl);
+    });
+    const hdl=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,20*S,8),brassMat);
+    hdl.rotation.z=Math.PI/2; hdl.position.set(s*(dW-18*S),dH*0.45,doorZ+5*S); scene.add(hdl);
+  });
+  const divStrip=new THREE.Mesh(new THREE.BoxGeometry(8*S,dH,dThick+6*S),frameMat2);
+  divStrip.position.set(0,dH/2,doorZ); scene.add(divStrip);
+
+  // ── FIREPLACE — back wall centre ──
+  const fpGroup=new THREE.Group();
+  const fpW=320*S,fpH=260*S,fpD=60*S;
+  const mantelSide=new THREE.Mesh(new THREE.BoxGeometry(24*S,fpH,fpD),marbleMat);
+  mantelSide.position.set(-fpW/2+12*S,fpH/2,0); fpGroup.add(mantelSide);
+  const mantelSideR=mantelSide.clone(); mantelSideR.position.x=fpW/2-12*S; fpGroup.add(mantelSideR);
+  const mantelTop=new THREE.Mesh(new THREE.BoxGeometry(fpW+20*S,22*S,fpD+10*S),marbleMat);
+  mantelTop.position.set(0,fpH+11*S,0); fpGroup.add(mantelTop);
+  const shelf=new THREE.Mesh(new THREE.BoxGeometry(fpW+50*S,16*S,fpD+35*S),marbleMat);
+  shelf.position.set(0,fpH+26*S,10*S); fpGroup.add(shelf);
+  const firebox=new THREE.Mesh(new THREE.BoxGeometry(fpW-50*S,fpH-30*S,fpD-10*S),darkMarble);
+  firebox.position.set(0,fpH/2-10*S,5*S); fpGroup.add(firebox);
+  for(let i=0;i<6;i++){const bar=new THREE.Mesh(new THREE.BoxGeometry(4*S,65*S,4*S),ironMat);bar.position.set(-46*S+i*18*S,30*S,8*S);fpGroup.add(bar);}
+  const grateBase=new THREE.Mesh(new THREE.BoxGeometry(fpW-50*S,8*S,22*S),ironMat);
+  grateBase.position.set(0,6*S,5*S); fpGroup.add(grateBase);
+  for(let i=0;i<7;i++){const ember=new THREE.Mesh(new THREE.BoxGeometry(12*S+i*4*S,9*S+i*6*S,9*S),emberMat);ember.position.set(-36*S+i*14*S,11*S+i*3*S,6*S);fpGroup.add(ember);}
+  const fireback=new THREE.Mesh(new THREE.BoxGeometry(fpW-52*S,fpH-34*S,6*S),ironMat);
+  fireback.position.set(0,fpH/2-13*S,-fpD/2+18*S); fpGroup.add(fireback);
+  const tileMat=new THREE.MeshLambertMaterial({color:0x1a2a4a});
+  [-1,1].forEach(s=>{for(let i=0;i<5;i++){const tile=new THREE.Mesh(new THREE.BoxGeometry(10*S,26*S,4*S),tileMat);tile.position.set(s*(fpW/2-30*S),28*S+i*32*S,fpD/2-4*S);fpGroup.add(tile);}});
+  fpGroup.position.set(0,0,-RD/2+fpD/2+8*S);
+  addGroup(fpGroup,"fireplace");
+
+  // ── Mantel decorations ──
+  const mantelGroup=new THREE.Group();
+  const shY=fpH+34*S;
+  // Ornate clock
+  const clockBase=new THREE.Mesh(new THREE.BoxGeometry(50*S,60*S,22*S),darkMarble);
+  clockBase.position.set(0,shY+30*S,0); mantelGroup.add(clockBase);
+  const clockFace=new THREE.Mesh(new THREE.CylinderGeometry(18*S,18*S,4*S,24),creamMat);
+  clockFace.rotation.x=Math.PI/2; clockFace.position.set(0,shY+42*S,13*S); mantelGroup.add(clockFace);
+  // Candelabras
+  [-1,1].forEach(s=>{
+    const cBase=new THREE.Mesh(new THREE.CylinderGeometry(9*S,12*S,9*S,12),goldMat);
+    cBase.position.set(s*90*S,shY+4.5*S,0); mantelGroup.add(cBase);
+    const cStem=new THREE.Mesh(new THREE.CylinderGeometry(3.5*S,6*S,55*S,8),goldMat);
+    cStem.position.set(s*90*S,shY+34*S,0); mantelGroup.add(cStem);
+    // 3-arm candelabra
+    [-1,0,1].forEach(arm=>{
+      const armMesh=new THREE.Mesh(new THREE.BoxGeometry(arm===0?3*S:40*S,3*S,3*S),goldMat);
+      armMesh.position.set(s*90*S+arm*20*S,shY+62*S,0); mantelGroup.add(armMesh);
+      const candle=new THREE.Mesh(new THREE.CylinderGeometry(3*S,3*S,20*S,8),creamMat);
+      candle.position.set(s*90*S+arm*20*S,shY+73*S,0); mantelGroup.add(candle);
+      const flame=new THREE.Mesh(new THREE.SphereGeometry(3*S,6,6),
+        new THREE.MeshLambertMaterial({color:0xff9900,emissive:0x884400,emissiveIntensity:1}));
+      flame.position.set(s*90*S+arm*20*S,shY+85*S,0); mantelGroup.add(flame);
+    });
+  });
+  // Vases
+  [-1,1].forEach(s=>{
+    const vBase=new THREE.Mesh(new THREE.CylinderGeometry(8*S,11*S,14*S,12),new THREE.MeshLambertMaterial({color:0x1a2a4a}));
+    vBase.position.set(s*160*S,shY+7*S,0); mantelGroup.add(vBase);
+    const vBody=new THREE.Mesh(new THREE.SphereGeometry(14*S,12,12),new THREE.MeshLambertMaterial({color:0x0f1f3d}));
+    vBody.position.set(s*160*S,shY+28*S,0); vBody.scale.set(1,1.4,1); mantelGroup.add(vBody);
+    const vNeck=new THREE.Mesh(new THREE.CylinderGeometry(6*S,8*S,20*S,10),new THREE.MeshLambertMaterial({color:0x2a4a7a}));
+    vNeck.position.set(s*160*S,shY+48*S,0); mantelGroup.add(vNeck);
+  });
+  mantelGroup.position.set(0,0,-RD/2+fpD/2+8*S);
+  addGroup(mantelGroup,"mantel_decorations");
+
+  // ── GRAND BED — centre of room ──
+  const bedGroup=new THREE.Group();
+  const bedW=340*S, bedL=440*S, bedH=70*S, mattH=30*S;
+  // Platform base
+  const bedBase=new THREE.Mesh(new THREE.BoxGeometry(bedW+20*S,bedH,bedL+20*S),darkWood);
+  bedBase.position.set(0,bedH/2,0); bedGroup.add(bedBase);
+  // Mattress
+  const mattress=new THREE.Mesh(new THREE.BoxGeometry(bedW,mattH,bedL),
+    new THREE.MeshLambertMaterial({color:0xe8e0d0}));
+  mattress.position.set(0,bedH+mattH/2,0); bedGroup.add(mattress);
+  // Bedding — burgundy coverlet
+  const coverlet=new THREE.Mesh(new THREE.BoxGeometry(bedW-4*S,mattH*0.6,bedL*0.75),velvetBurg);
+  coverlet.position.set(0,bedH+mattH+mattH*0.3,bedL*0.1); bedGroup.add(coverlet);
+  // Pillows
+  [-1,1].forEach(s=>{
+    const pillow=new THREE.Mesh(new THREE.BoxGeometry(130*S,18*S,70*S),creamMat);
+    pillow.position.set(s*90*S,bedH+mattH+18*S,-bedL/2+50*S); bedGroup.add(pillow);
+  });
+  // Gold trim on coverlet edge
+  const trim=new THREE.Mesh(new THREE.BoxGeometry(bedW-4*S,4*S,8*S),goldMat);
+  trim.position.set(0,bedH+mattH+mattH*0.6,bedL*0.1+bedL*0.75/2-4*S); bedGroup.add(trim);
+  // Four poster legs
+  const postH=RH*0.85;
+  [[-bedW/2,-bedL/2],[bedW/2,-bedL/2],[-bedW/2,bedL/2],[bedW/2,bedL/2]].forEach(([px,pz])=>{
+    const post=new THREE.Mesh(new THREE.CylinderGeometry(12*S,14*S,postH,12),darkWood);
+    post.position.set(px,postH/2,pz); bedGroup.add(post);
+    // Post finial
+    const finial=new THREE.Mesh(new THREE.SphereGeometry(16*S,10,10),richWood);
+    finial.position.set(px,postH+14*S,pz); bedGroup.add(finial);
+    // Carved base
+    const carve=new THREE.Mesh(new THREE.BoxGeometry(28*S,20*S,28*S),richWood);
+    carve.position.set(px,10*S,pz); bedGroup.add(carve);
+  });
+  // Headboard
+  const headboard=new THREE.Mesh(new THREE.BoxGeometry(bedW+10*S,220*S,18*S),richWood);
+  headboard.position.set(0,bedH+110*S,-bedL/2-4*S); bedGroup.add(headboard);
+  const hbPanel=new THREE.Mesh(new THREE.BoxGeometry(bedW-20*S,180*S,8*S),velvetBurg);
+  hbPanel.position.set(0,bedH+110*S,-bedL/2+5*S); bedGroup.add(hbPanel);
+  // Headboard arch top
+  const arch=new THREE.Mesh(new THREE.CylinderGeometry((bedW+10*S)/2,(bedW+10*S)/2,18*S,20,1,false,0,Math.PI),richWood);
+  arch.rotation.z=Math.PI/2; arch.rotation.y=Math.PI/2;
+  arch.position.set(0,bedH+220*S,-bedL/2-4*S); bedGroup.add(arch);
+  // Canopy frame top
+  const canopyTop=new THREE.Mesh(new THREE.BoxGeometry(bedW+30*S,12*S,bedL+30*S),darkWood);
+  canopyTop.position.set(0,postH+6*S,0); bedGroup.add(canopyTop);
+  // Canopy drapes — thin sheer panels
+  const drapeMat=new THREE.MeshLambertMaterial({color:0x5a0820,transparent:true,opacity:0.55,side:THREE.DoubleSide});
+  [[-bedW/2-2*S,0,Math.PI/2],[bedW/2+2*S,0,-Math.PI/2],[0,-bedL/2-2*S,0],[0,bedL/2+2*S,Math.PI]].forEach(([dx,dz,ry])=>{
+    const drapeW=dx!==0?bedL:bedW;
+    const drape=new THREE.Mesh(new THREE.PlaneGeometry(drapeW,postH),drapeMat);
+    drape.rotation.y=ry; drape.position.set(dx,postH/2,dz); bedGroup.add(drape);
+  });
+  bedGroup.position.set(0,0,50*S);
+  addGroup(bedGroup,"grand_bed");
+
+  // ── Wardrobe — left wall ──
+  const wardGroup=new THREE.Group();
+  const wdW=320*S,wdH=420*S,wdD=70*S;
+  const wdBody=new THREE.Mesh(new THREE.BoxGeometry(wdW,wdH,wdD),darkWood);
+  wdBody.position.set(0,wdH/2,0); wardGroup.add(wdBody);
+  const wdCrown=new THREE.Mesh(new THREE.BoxGeometry(wdW+16*S,20*S,wdD+10*S),richWood);
+  wdCrown.position.set(0,wdH+10*S,0); wardGroup.add(wdCrown);
+  const wdBase=new THREE.Mesh(new THREE.BoxGeometry(wdW+10*S,14*S,wdD+6*S),richWood);
+  wdBase.position.set(0,7*S,0); wardGroup.add(wdBase);
+  [-1,1].forEach(s=>{
+    const door=new THREE.Mesh(new THREE.BoxGeometry(wdW/2-4*S,wdH-20*S,8*S),midWood);
+    door.position.set(s*wdW/4,wdH/2,wdD/2+2*S); wardGroup.add(door);
+    [wdH*0.25,wdH*0.55,wdH*0.78].forEach(py=>{
+      const pnl=new THREE.Mesh(new THREE.BoxGeometry(wdW/2-24*S,wdH*0.18,5*S),richWood);
+      pnl.position.set(s*wdW/4,py,wdD/2+4*S); wardGroup.add(pnl);
+    });
+    const knob=new THREE.Mesh(new THREE.SphereGeometry(6*S,8,8),goldMat);
+    knob.position.set(s*8*S,wdH*0.5,wdD/2+7*S); wardGroup.add(knob);
+    // Mirror panel
+    const mirror=new THREE.Mesh(new THREE.BoxGeometry(wdW/2-30*S,wdH*0.25,4*S),
+      new THREE.MeshLambertMaterial({color:0x8899aa,emissive:0x112233}));
+    mirror.position.set(s*wdW/4,wdH*0.85,wdD/2+5*S); wardGroup.add(mirror);
+  });
+  const centerDiv=new THREE.Mesh(new THREE.BoxGeometry(8*S,wdH,wdD+4*S),richWood);
+  centerDiv.position.set(0,wdH/2,0); wardGroup.add(centerDiv);
+  wardGroup.position.set(-RW/2+wdD/2+14*S,0,-80*S);
+  addGroup(wardGroup,"wardrobe");
+
+  // ── Dressing table — right wall ──
+  const dressGroup=new THREE.Group();
+  const dtW=220*S,dtH=88*S,dtD=60*S;
+  const dtTop=new THREE.Mesh(new THREE.BoxGeometry(dtW,10*S,dtD),richWood);
+  dtTop.position.set(0,dtH,0); dressGroup.add(dtTop);
+  const dtFront=new THREE.Mesh(new THREE.BoxGeometry(dtW,dtH,12*S),darkWood);
+  dtFront.position.set(0,dtH/2,dtD/2-6*S); dressGroup.add(dtFront);
+  const dtSideL=new THREE.Mesh(new THREE.BoxGeometry(12*S,dtH,dtD),darkWood);
+  dtSideL.position.set(-dtW/2+6*S,dtH/2,0); dressGroup.add(dtSideL);
+  const dtSideR=dtSideL.clone(); dtSideR.position.x=dtW/2-6*S; dressGroup.add(dtSideR);
+  // Mirror above
+  const dtMirrorFrame=new THREE.Mesh(new THREE.BoxGeometry(dtW-20*S,160*S,10*S),goldMat);
+  dtMirrorFrame.position.set(0,dtH+90*S,0); dressGroup.add(dtMirrorFrame);
+  const dtMirror=new THREE.Mesh(new THREE.BoxGeometry(dtW-36*S,144*S,6*S),
+    new THREE.MeshLambertMaterial({color:0x8899aa,emissive:0x112233}));
+  dtMirror.position.set(0,dtH+90*S,3*S); dressGroup.add(dtMirror);
+  // Perfume bottles
+  [-40*S,0,40*S].forEach((bx,i)=>{
+    const col=[0x4a2a6a,0x6a1a1a,0x1a4a3a][i];
+    const bottle=new THREE.Mesh(new THREE.CylinderGeometry(5*S,7*S,18*S,10),
+      new THREE.MeshLambertMaterial({color:col,transparent:true,opacity:0.8}));
+    bottle.position.set(bx,dtH+14*S,0); dressGroup.add(bottle);
+    const stopper=new THREE.Mesh(new THREE.SphereGeometry(4*S,8,8),goldMat);
+    stopper.position.set(bx,dtH+24*S,0); dressGroup.add(stopper);
+  });
+  // Stool
+  const stool=new THREE.Mesh(new THREE.CylinderGeometry(28*S,28*S,8*S,16),velvetBurg);
+  stool.position.set(0,50*S,dtD/2+35*S); dressGroup.add(stool);
+  const stoolStem=new THREE.Mesh(new THREE.CylinderGeometry(6*S,8*S,45*S,8),darkWood);
+  stoolStem.position.set(0,27*S,dtD/2+35*S); dressGroup.add(stoolStem);
+  const stoolBase=new THREE.Mesh(new THREE.CylinderGeometry(22*S,22*S,6*S,16),darkWood);
+  stoolBase.position.set(0,3*S,dtD/2+35*S); dressGroup.add(stoolBase);
+  dressGroup.position.set(RW/2-dtD/2-14*S,0,-80*S);
+  addGroup(dressGroup,"dressing_table");
+
+  // ── Two armchairs by fireplace ──
+  [[-180*S,150*S,Math.PI*0.2],[180*S,150*S,-Math.PI*0.2]].forEach(([ax,az,ry],i)=>{
+    const acGroup=new THREE.Group();
+    const seat=new THREE.Mesh(new THREE.BoxGeometry(120*S,22*S,110*S),velvetRed);
+    seat.position.set(0,50*S,0); acGroup.add(seat);
+    const back=new THREE.Mesh(new THREE.BoxGeometry(120*S,100*S,18*S),velvetRed);
+    back.position.set(0,100*S,44*S); acGroup.add(back);
+    const backTop=new THREE.Mesh(new THREE.BoxGeometry(126*S,14*S,22*S),richWood);
+    backTop.position.set(0,152*S,44*S); acGroup.add(backTop);
+    [-1,1].forEach(s=>{
+      const arm=new THREE.Mesh(new THREE.BoxGeometry(110*S,32*S,18*S),velvetRed);
+      arm.rotation.y=Math.PI/2; arm.position.set(s*51*S,65*S,0); acGroup.add(arm);
+    });
+    [[-50*S,-38*S],[50*S,-38*S],[-50*S,38*S],[50*S,38*S]].forEach(([ox,oz])=>{
+      const leg=new THREE.Mesh(new THREE.CylinderGeometry(5*S,4*S,32*S,8),darkWood);
+      leg.position.set(ox,16*S,oz); acGroup.add(leg);
+    });
+    const cush=new THREE.Mesh(new THREE.BoxGeometry(100*S,16*S,90*S),
+      new THREE.MeshLambertMaterial({color:0x7a0808}));
+    cush.position.set(0,62*S,-5*S); acGroup.add(cush);
+    acGroup.position.set(ax,0,az); acGroup.rotation.y=ry;
+    addGroup(acGroup,"armchair_"+(i===0?"left":"right"));
+  });
+
+  // ── Small table between chairs ──
+  const sideTable=new THREE.Group();
+  const stTop2=new THREE.Mesh(new THREE.CylinderGeometry(30*S,30*S,8*S,16),richWood);
+  stTop2.position.set(0,88*S,0); sideTable.add(stTop2);
+  const stStem2=new THREE.Mesh(new THREE.CylinderGeometry(6*S,10*S,70*S,10),darkWood);
+  stStem2.position.set(0,53*S,0); sideTable.add(stStem2);
+  const stBase2=new THREE.Mesh(new THREE.CylinderGeometry(20*S,20*S,6*S,16),darkWood);
+  stBase2.position.set(0,3*S,0); sideTable.add(stBase2);
+  // Candle on table
+  const tc=new THREE.Mesh(new THREE.CylinderGeometry(4*S,4*S,16*S,8),creamMat);
+  tc.position.set(0,100*S,0); sideTable.add(tc);
+  const tf=new THREE.Mesh(new THREE.SphereGeometry(4*S,6,6),
+    new THREE.MeshLambertMaterial({color:0xff9900,emissive:0x884400,emissiveIntensity:1}));
+  tf.position.set(0,111*S,0); sideTable.add(tf);
+  sideTable.position.set(0,0,150*S);
+  addGroup(sideTable,"side_table");
+
+  // ── Large rug ──
+  const rugGroup=new THREE.Group();
+  const rugBorder=new THREE.Mesh(new THREE.BoxGeometry(700*S,2*S,560*S),
+    new THREE.MeshLambertMaterial({color:0xd4a820}));
+  rugBorder.position.set(0,1*S,0); rugGroup.add(rugBorder);
+  const rug=new THREE.Mesh(new THREE.BoxGeometry(680*S,2*S,540*S),
+    new THREE.MeshLambertMaterial({color:0x5a0808}));
+  rug.position.set(0,1.5*S,0); rugGroup.add(rug);
+  // Inner pattern
+  const rugInner=new THREE.Mesh(new THREE.BoxGeometry(580*S,2.5*S,440*S),
+    new THREE.MeshLambertMaterial({color:0x6a1010}));
+  rugInner.position.set(0,2*S,0); rugGroup.add(rugInner);
+  rugGroup.position.set(0,0,50*S);
+  addGroup(rugGroup,"rug");
+
+  // ── Single wide French door — right wall, centred ──
+  const fdH=RH, fdW=300*S, fdThick=8*S, fdJAMB=16*S;
+  const fdFrameMat=new THREE.MeshLambertMaterial({color:0xc8a46e});
+  const fdDoorMat=new THREE.MeshLambertMaterial({color:0x5a8a5a});
+  const fdGlassMat=new THREE.MeshLambertMaterial({color:0x88c8ff,transparent:true,opacity:0.25,side:THREE.DoubleSide});
+
+  const fdGroup=new THREE.Group();
+  // Top frame
+  const ftop=new THREE.Mesh(new THREE.BoxGeometry(fdJAMB,fdJAMB,fdW+fdJAMB*2),fdFrameMat);
+  ftop.position.set(0,fdH+fdJAMB/2,0); fdGroup.add(ftop);
+  // Side frames
+  [-fdW/2-fdJAMB/2,fdW/2+fdJAMB/2].forEach(fz=>{
+    const fs=new THREE.Mesh(new THREE.BoxGeometry(fdJAMB,fdH,fdJAMB),fdFrameMat);
+    fs.position.set(0,fdH/2,fz); fdGroup.add(fs);
+  });
+  // Two door leaves
+  [-1,1].forEach(s=>{
+    const leaf=new THREE.Mesh(new THREE.BoxGeometry(fdThick,fdH,fdW/2),fdDoorMat);
+    leaf.position.set(0,fdH/2,s*fdW/4); fdGroup.add(leaf);
+    // Glass panes — 3 rows
+    [fdH*0.15,fdH*0.42,fdH*0.70].forEach(py=>{
+      const pane=new THREE.Mesh(new THREE.BoxGeometry(fdThick+2*S,fdH*0.2,fdW/2-16*S),fdGlassMat);
+      pane.position.set(0,py,s*fdW/4); fdGroup.add(pane);
+    });
+    // Handle
+    const hdl=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,16*S,8),brassMat);
+    hdl.position.set(6*S,fdH*0.45,s*(fdW/4-8*S)); fdGroup.add(hdl);
+  });
+  // Centre divider
+  const div=new THREE.Mesh(new THREE.BoxGeometry(fdThick+2*S,fdH,8*S),fdFrameMat);
+  div.position.set(0,fdH/2,0); fdGroup.add(div);
+  // Curtains
+  [-1,1].forEach(s=>{
+    const curtain=new THREE.Mesh(new THREE.BoxGeometry(12*S,fdH+30*S,55*S),velvetBurg);
+    curtain.position.set(0,fdH/2,s*(fdW/2+30*S)); fdGroup.add(curtain);
+  });
+  const pelmet=new THREE.Mesh(new THREE.BoxGeometry(12*S,26*S,fdW+120*S),richWood);
+  pelmet.position.set(0,fdH+18*S,0); fdGroup.add(pelmet);
+  fdGroup.position.set(RW/2-fdThick/2,0,0);
+  fdGroup.rotation.y=Math.PI/2;
+  addGroup(fdGroup,"french_door");
+
+  // ── Wall gaps for French doors (replace right wall sections) ──
+  // Right wall is already placed as a full slab — we need to cut it.
+  // Replace the rightWall with sections that have gaps at the door positions.
+  // The right wall was already added; add cover panels for the gaps:
+  // (The doors sit flush in the wall and cover the gap visually)
+
+  // ── Bedside tables ──
+  [-1,1].forEach((s,i)=>{
+    const bstGroup=new THREE.Group();
+    const bstTop=new THREE.Mesh(new THREE.BoxGeometry(80*S,8*S,70*S),richWood);
+    bstTop.position.set(0,80*S,0); bstGroup.add(bstTop);
+    const bstBody=new THREE.Mesh(new THREE.BoxGeometry(78*S,70*S,68*S),darkWood);
+    bstBody.position.set(0,41*S,0); bstGroup.add(bstBody);
+    // Drawer
+    const drawer=new THREE.Mesh(new THREE.BoxGeometry(70*S,28*S,8*S),midWood);
+    drawer.position.set(0,50*S,34*S); bstGroup.add(drawer);
+    const dknob=new THREE.Mesh(new THREE.SphereGeometry(4*S,8,8),goldMat);
+    dknob.position.set(0,50*S,38*S); bstGroup.add(dknob);
+    // Oil lamp
+    const lBase=new THREE.Mesh(new THREE.CylinderGeometry(9*S,11*S,12*S,12),brassMat);
+    lBase.position.set(0,92*S,0); bstGroup.add(lBase);
+    const lGlobe=new THREE.Mesh(new THREE.SphereGeometry(13*S,12,12),
+      new THREE.MeshLambertMaterial({color:0xffeeaa,transparent:true,opacity:0.45}));
+    lGlobe.position.set(0,110*S,0); bstGroup.add(lGlobe);
+    const lShade=new THREE.Mesh(new THREE.CylinderGeometry(16*S,9*S,14*S,12,1,true),
+      new THREE.MeshLambertMaterial({color:0x3a2000,side:THREE.DoubleSide}));
+    lShade.position.set(0,120*S,0); bstGroup.add(lShade);
+    bstGroup.position.set(s*(340*S/2+50*S),0,-RD/2+200*S);
+    addGroup(bstGroup,"bedside_table_"+(i===0?"left":"right"));
+  });
+
+  // ── Portrait paintings on back wall ──
+  const portL=makePicture(100*S,140*S,SVG_PORTRAIT_LORD,"portrait_lord");
+  portL.position.set(-220*S,290*S,-RD/2+12*S);
+  const portLa=makePicture(100*S,140*S,SVG_PORTRAIT_LADY,"portrait_lady");
+  portLa.position.set(220*S,290*S,-RD/2+12*S);
+  // Landscape above fireplace
+  const landPic=makePicture(260*S,180*S,SVG_LANDSCAPE,"picture_landscape");
+  landPic.position.set(0,420*S,-RD/2+12*S);
+  // Castle on left wall
+  const castPic=makePicture(110*S,140*S,SVG_CASTLE,"picture_castle");
+  castPic.rotation.y=Math.PI/2; castPic.position.set(-RW/2+12*S,290*S,0);
+
+  // ── Closet door — right wall, near back, ceiling height — EDITABLE ──
+  const cdGroup=new THREE.Group();
+  const cdW=130*S, cdH=RH, cdJAMB=16*S;
+  const cdFrameMat=new THREE.MeshLambertMaterial({color:0xc8a46e});
+  const cdDoorMat=new THREE.MeshLambertMaterial({color:0x6b3a1f});
+  const cdPanelMat=new THREE.MeshLambertMaterial({color:0x8b4e28});
+  // Top frame
+  const cdFTop=new THREE.Mesh(new THREE.BoxGeometry(cdJAMB,cdJAMB,cdW+cdJAMB*2),cdFrameMat);
+  cdFTop.position.set(0,cdH+cdJAMB/2,0); cdGroup.add(cdFTop);
+  // Side frames
+  [-cdW/2-cdJAMB/2, cdW/2+cdJAMB/2].forEach(fz=>{
+    const fs=new THREE.Mesh(new THREE.BoxGeometry(cdJAMB,cdH,cdJAMB),cdFrameMat);
+    fs.position.set(0,cdH/2,fz); cdGroup.add(fs);
+  });
+  // Door leaf
+  const cdDoor=new THREE.Mesh(new THREE.BoxGeometry(cdJAMB,cdH,cdW),cdDoorMat);
+  cdDoor.position.set(0,cdH/2,0); cdGroup.add(cdDoor);
+  // Recessed panels
+  [cdH*0.12,cdH*0.35,cdH*0.58,cdH*0.80].forEach(py=>{
+    const pnl=new THREE.Mesh(new THREE.BoxGeometry(cdJAMB+2*S,cdH*0.15,cdW-20*S),cdPanelMat);
+    pnl.position.set(0,py,0); cdGroup.add(pnl);
+  });
+  // Handle
+  const cdHdl=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,16*S,8),brassMat);
+  cdHdl.position.set(-8*S,cdH*0.45,-cdW/2+14*S); cdGroup.add(cdHdl);
+  cdGroup.position.set(RW/2-8*S,0,-RD/2+150*S);
+  addGroup(cdGroup,"closet_door");
+}
+
+function onResize(){camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);}
+function updateRotation(){camera.rotation.order="YXZ";camera.rotation.set(0,yaw,0);}
+
+const exitCooldown=(new URLSearchParams(window.location.search).get("from")==="floor2")?Date.now()+4000:0;
+const closetCooldown=(new URLSearchParams(window.location.search).get("from")==="lord_ladiesroom")?Date.now()+4000:0;
+const balconyCooldown=(new URLSearchParams(window.location.search).get("from")==="balcony")?Date.now()+4000:0;
+let exitTriggered=false, nearExit=false;
+let closetTriggered=false, nearCloset=false;
+let balconyTriggered=false, nearBalcony=false;
+function checkExitDoor(){
+  if(!exitTriggered && Date.now()>exitCooldown){
+    nearExit=camera.position.x>-210*S&&camera.position.x<210*S&&camera.position.z>RD/2-200*S;
+    document.getElementById("doorHint").style.display=nearExit?"block":"none";
+  }
+  if(!closetTriggered && Date.now()>closetCooldown){
+    const cdg=editableObjects.find(o=>o.userData.editId==="closet_door");
+    if(cdg){
+      const wp=new THREE.Vector3(); cdg.getWorldPosition(wp);
+      nearCloset=Math.abs(camera.position.x-wp.x)<280&&Math.abs(camera.position.z-wp.z)<180;
+    }
+    document.getElementById("closetHint").style.display=nearCloset?"block":"none";
+  }
+  if(!balconyTriggered && Date.now()>balconyCooldown){
+    // French door is at X=RW/2, Z=0
+    nearBalcony=camera.position.x>RW/2-200&&Math.abs(camera.position.z)<200;
+    document.getElementById("balconyHint").style.display=nearBalcony?"block":"none";
+  }
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now(); const delta=(now-prevTime)/1000; prevTime=now;
+  if(!EDIT_MODE){
+    if(turnLeft) yaw+=2.2*delta; if(turnRight) yaw-=2.2*delta;
+    const mv=Number(moveForward)-Number(moveBackward);
+    if(mv!==0&&window.SoundSystem)SoundSystem.footstep();
+    const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+    camera.position.x+=fwd.x*mv*120*delta;
+    camera.position.z+=fwd.z*mv*120*delta;
+    camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2-20*S,camera.position.x));
+    camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-15*S,camera.position.z));
+    camera.position.y=240*S;
+  }
+  checkExitDoor(); updateRotation(); renderer.render(scene,camera);
+  EvidenceSystem.update();
+  // Debug: show player position and closet door position
+  document.title = `pos X:${Math.round(camera.position.x)} Z:${Math.round(camera.position.z)} | door X:${Math.round(CLOSET_DOOR_X)} Z:${Math.round(CLOSET_DOOR_Z)} near:${nearCloset}`;
+}
+
+// engine scripts loaded below
+</script>
+<script src="../../floor1/sound-system.js"></script>
+<script src="../../floor1/mystery-engine.js"></script>
+<script src="../../floor1/mystery-state.js"></script>
+<script src="../../floor1/mystery-ui.js"></script>
+<script src="../../floor1/evidence-system.js"></script>
+<script>
+(async()=>{
+  await MysteryEngine.init();
+  let scenario=await MysteryState.load();
+  if(!scenario){scenario=MysteryEngine.generate();await MysteryState.save(scenario);}
+  window._scenario=scenario;
+  MysteryUI.init(scenario,false);
+  MysteryUI.setZone('lord_ladies');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'walkin_closet' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

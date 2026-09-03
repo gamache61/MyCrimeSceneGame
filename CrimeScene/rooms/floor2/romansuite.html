@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Roman Imperial Chamber</title>
+<style>
+#exitFade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9999;transition:opacity 0.6s ease;}
+#exitFade.show{opacity:1;}
+#instructionLine{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:8px 16px;font-size:14px;color:#eee;background:rgba(0,0,0,0.6);border-radius:6px;z-index:30;pointer-events:none;white-space:nowrap;}
+body{margin:0;overflow:hidden;background:#000;font-family:Arial,sans-serif;}
+canvas{display:block;}
+#fadeOverlay{position:fixed;inset:0;background:#000;z-index:9999;animation:fadeOut 0.8s ease forwards;}
+@keyframes fadeOut{from{opacity:1;}to{opacity:0;}}
+#editHud{position:fixed;top:58px;left:50%;transform:translateX(-50%);z-index:60;display:flex;gap:8px;align-items:center;}
+#editBtn,#saveBtn,#loadBtn,#clearBtn{padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:rgba(0,0,0,0.72);color:#eee;cursor:pointer;}
+#editIndicator{padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(255,255,255,0.20);background:rgba(80,20,20,0.8);color:#ffd0d0;}
+#editIndicator.on{background:rgba(20,80,20,0.85);color:#d5ffd5;}
+#autoStatus{position:fixed;top:108px;left:50%;transform:translateX(-50%);padding:8px 12px;border-radius:10px;background:rgba(0,0,0,0.65);color:#d7f7d7;font:12px/1.35 system-ui;display:none;z-index:70;pointer-events:none;}
+#selInfo{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:8px 18px;background:rgba(0,0,0,0.8);color:#aaddff;border-radius:8px;font-size:13px;display:none;z-index:60;pointer-events:none;}
+#debugHud{position:fixed;left:10px;bottom:10px;color:#9ff;font:12px monospace;background:rgba(0,0,0,0.7);padding:8px;border-radius:6px;display:none;z-index:100;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit &nbsp; M = Edit Mode &nbsp; G = Grid</div>
+<div id="doorHint" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#d4a840;border-radius:4px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(200,140,40,0.5);">Press E — Return to Floor 2</div>
+<div id="closetHint" style="position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#c8a030;border-radius:4px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(200,140,40,0.5);">Press E — Enter Dressing Room</div>
+<div id="fadeOverlay"></div>
+<div id="editHud">
+  <button id="editBtn" type="button">Edit Mode</button>
+  <button id="saveBtn" type="button">Save Layout</button>
+  <button id="loadBtn" type="button">Load Layout</button>
+  <button id="clearBtn" type="button">Clear Save</button>
+  <div id="editIndicator">OFF</div>
+</div>
+<div id="autoStatus"></div>
+<div id="selInfo"></div>
+<div id="debugHud"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+const STORAGE_KEY="roman_imperial_chamber_layout";
+const S=0.5;
+const RW=1600*S, RD=1600*S, RH=650*S;
+let scene,camera,renderer,yaw=0,prevTime=performance.now();
+let moveForward=false,moveBackward=false,turnLeft=false,turnRight=false;
+let EDIT_MODE=false,selectedObject=null;
+const editableObjects=[];
+const raycaster=new THREE.Raycaster();
+const mouse=new THREE.Vector2();
+let _ec=0;
+let DEBUG_ON=false,debugGroup=null,positionDisplayInterval=null;
+let nearCloset=false,closetTriggered=false,closetDoorsOpen=false;
+let closetDoorPivots=[];
+
+function addGroup(g,id){g.userData.editId=id||("grp_"+(++_ec));editableObjects.push(g);scene.add(g);return g;}
+function showStatus(msg,ok=true){const el=document.getElementById("autoStatus");el.style.display="block";el.style.color=ok?"#d7f7d7":"#ffd7d7";el.textContent=msg;setTimeout(()=>{el.style.display="none";},2200);}
+function updateEditUI(){const ind=document.getElementById("editIndicator");ind.textContent=EDIT_MODE?"ON":"OFF";ind.classList.toggle("on",EDIT_MODE);const btn=document.getElementById("editBtn");btn.textContent=EDIT_MODE?"✏️ Edit Mode: ON":"Edit Mode: OFF";btn.style.background=EDIT_MODE?"rgba(20,80,20,0.85)":"rgba(0,0,0,0.72)";}
+function toggleEditMode(){EDIT_MODE=!EDIT_MODE;if(!EDIT_MODE){selectedObject=null;document.getElementById("selInfo").style.display="none";}updateEditUI();}
+function saveLayout(){const objects=editableObjects.map(o=>{const wp=new THREE.Vector3();o.getWorldPosition(wp);const wq=new THREE.Quaternion();o.getWorldQuaternion(wq);return{id:o.userData.editId,position:{x:wp.x,y:wp.y,z:wp.z},quaternion:{x:wq.x,y:wq.y,z:wq.z,w:wq.w},scale:{x:o.scale.x,y:o.scale.y,z:o.scale.z}};});localStorage.setItem(STORAGE_KEY,JSON.stringify({version:1,objects}));showStatus("✅ Saved");}
+function loadLayout(){const json=localStorage.getItem(STORAGE_KEY);if(!json){showStatus("No saved layout",false);return;}try{const d=JSON.parse(json);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}showStatus("✅ Loaded");}catch(e){showStatus("Load failed",false);}}
+function clearSave(){localStorage.removeItem(STORAGE_KEY);showStatus("🗑 Cleared");}
+function onMouseClick(e){if(!EDIT_MODE)return;const rect=renderer.domElement.getBoundingClientRect();mouse.x=((e.clientX-rect.left)/rect.width)*2-1;mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;raycaster.setFromCamera(mouse,camera);const meshes=[];editableObjects.forEach(o=>{if(o.isMesh)meshes.push(o);else o.traverse(ch=>{if(ch.isMesh)meshes.push(ch);});});const hits=raycaster.intersectObjects(meshes,false);if(!hits.length){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}let obj=hits[0].object;let cur=obj;while(cur){if(editableObjects.includes(cur)){obj=cur;break;}cur=cur.parent;}selectedObject=obj;document.getElementById("selInfo").style.display="block";document.getElementById("selInfo").textContent=`✏️ ${obj.userData.editId} | Arrows=Move Shift+↑↓=Height R=Rotate Del=Delete`;showStatus("Selected: "+obj.userData.editId);}
+function buildDebug(){debugGroup=new THREE.Group();debugGroup.visible=false;scene.add(debugGroup);const g=new THREE.GridHelper(4000,80,0x4488ff,0x222244);g.position.y=5;debugGroup.add(g);const f=new THREE.GridHelper(4000,400,0x335577,0x1a1a22);f.position.y=3;debugGroup.add(f);const a=new THREE.AxesHelper(400);a.position.y=10;debugGroup.add(a);}
+function toggleDebug(){DEBUG_ON=!DEBUG_ON;if(debugGroup)debugGroup.visible=DEBUG_ON;const hud=document.getElementById("debugHud");hud.style.display=DEBUG_ON?"block":"none";if(DEBUG_ON){positionDisplayInterval=setInterval(()=>{const p=camera.position,yd=((yaw||0)*(180/Math.PI)).toFixed(1);document.getElementById("debugHud").innerHTML=`X: ${p.x.toFixed(1)}<br>Y: ${p.y.toFixed(1)}<br>Z: ${p.z.toFixed(1)}<br>Yaw: ${yd}°`;},100);}else{clearInterval(positionDisplayInterval);}}
+
+// SVG Texture
+const _svgMatCache={};
+function makeSVGTexture(svgStr,w,h){
+  const key=svgStr+(w||512)+(h||512);
+  if(_svgMatCache[key])return _svgMatCache[key];
+  try{const cw=w||512,ch=h||512;const canvas=document.createElement('canvas');canvas.width=cw;canvas.height=ch;const ctx=canvas.getContext('2d');const blob=new Blob([svgStr],{type:'image/svg+xml'});const url=URL.createObjectURL(blob);const tex=new THREE.CanvasTexture(canvas);const mat=new THREE.MeshLambertMaterial({map:tex,color:0xffffff,side:THREE.DoubleSide});const img=new Image();img.onload=()=>{ctx.drawImage(img,0,0,cw,ch);tex.needsUpdate=true;URL.revokeObjectURL(url);};img.src=url;_svgMatCache[key]=mat;return mat;}
+  catch(e){return new THREE.MeshLambertMaterial({color:0x9a7050,side:THREE.DoubleSide});}
+}
+
+// ── Roman SVGs ──
+// Mosaic floor pattern
+const SVG_MOSAIC=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 300">
+<rect width="300" height="300" fill="#8a7050"/>
+<rect x="10" y="10" width="280" height="280" fill="#c8b890" rx="2"/>
+<!-- Border meander/key pattern -->
+<rect x="14" y="14" width="272" height="272" fill="none" stroke="#6a3010" stroke-width="6"/>
+<rect x="22" y="22" width="256" height="256" fill="none" stroke="#c89040" stroke-width="3"/>
+<!-- Greek key border segments -->
+<g fill="#6a3010">
+  <rect x="30" y="26" width="10" height="10"/><rect x="50" y="26" width="10" height="10"/><rect x="70" y="26" width="10" height="10"/><rect x="90" y="26" width="10" height="10"/>
+  <rect x="110" y="26" width="10" height="10"/><rect x="130" y="26" width="10" height="10"/><rect x="150" y="26" width="10" height="10"/><rect x="170" y="26" width="10" height="10"/>
+  <rect x="190" y="26" width="10" height="10"/><rect x="210" y="26" width="10" height="10"/><rect x="230" y="26" width="10" height="10"/><rect x="250" y="26" width="10" height="10"/>
+</g>
+<!-- Central medallion -->
+<circle cx="150" cy="150" r="90" fill="#b8a878" stroke="#6a3010" stroke-width="4"/>
+<circle cx="150" cy="150" r="70" fill="#c8b890" stroke="#c89040" stroke-width="2"/>
+<!-- Eagle in centre -->
+<ellipse cx="150" cy="148" rx="18" ry="14" fill="#3a2808"/>
+<polygon points="150,126 142,148 158,148" fill="#3a2808"/>
+<polygon points="120,140 150,148 130,158" fill="#3a2808" opacity="0.8"/>
+<polygon points="180,140 150,148 170,158" fill="#3a2808" opacity="0.8"/>
+<circle cx="150" cy="136" r="6" fill="#3a2808"/>
+<circle cx="148" cy="134" r="2" fill="#c0a030"/>
+<!-- Rays from medallion -->
+<g stroke="#c89040" stroke-width="1.5" opacity="0.6">
+  <line x1="150" y1="80" x2="150" y2="60"/><line x1="150" y1="220" x2="150" y2="240"/>
+  <line x1="80" y1="150" x2="60" y2="150"/><line x1="220" y1="150" x2="240" y2="150"/>
+  <line x1="107" y1="107" x2="93" y2="93"/><line x1="193" y1="107" x2="207" y2="93"/>
+  <line x1="107" y1="193" x2="93" y2="207"/><line x1="193" y1="193" x2="207" y2="207"/>
+</g>
+<!-- Small tesserae dots around ring -->
+<g fill="#8a5020" opacity="0.7">
+  <circle cx="150" cy="82" r="4"/><circle cx="150" cy="218" r="4"/>
+  <circle cx="82" cy="150" r="4"/><circle cx="218" cy="150" r="4"/>
+</g>
+</svg>`;
+
+// Roman Emperor fresco
+const SVG_EMPEROR=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 300">
+<rect width="220" height="300" fill="#c8a870"/>
+<!-- Aged fresco texture -->
+<rect x="0" y="0" width="220" height="300" fill="#d4b880" opacity="0.6"/>
+<rect x="0" y="240" width="220" height="60" fill="#b89850"/>
+<!-- Background sky -->
+<rect x="0" y="0" width="220" height="160" fill="#7090c0" opacity="0.5"/>
+<!-- Architecture behind figure -->
+<rect x="140" y="40" width="12" height="140" fill="#c8a060" opacity="0.6"/>
+<rect x="60" y="40" width="12" height="140" fill="#c8a060" opacity="0.6"/>
+<!-- Figure body - toga -->
+<ellipse cx="110" cy="200" rx="60" ry="80" fill="#e8e0d0"/>
+<path d="M70 160 Q85 140 110 145 Q135 140 150 160 Q160 200 150 260 Q110 270 70 260 Z" fill="#e8e0d0"/>
+<!-- Toga drape -->
+<path d="M68 170 Q80 155 95 160 L90 240 Q78 238 68 170" fill="#d0c8b8"/>
+<path d="M68 170 Q60 180 62 220 Q65 238 78 242 Q70 210 68 170" fill="#c8c0a8"/>
+<!-- Head -->
+<ellipse cx="110" cy="108" rx="30" ry="34" fill="#d4a870"/>
+<!-- Face features -->
+<ellipse cx="100" cy="106" rx="5" ry="4" fill="#8a5030"/>
+<ellipse cx="120" cy="106" rx="5" ry="4" fill="#8a5030"/>
+<path d="M98 116 Q110 122 122 116" fill="none" stroke="#8a5030" stroke-width="1.5"/>
+<path d="M94 98 Q100 93 106 96" fill="none" stroke="#8a5030" stroke-width="1.2"/>
+<path d="M114 96 Q120 93 126 98" fill="none" stroke="#8a5030" stroke-width="1.2"/>
+<!-- Laurel wreath -->
+<g fill="#406030">
+  <ellipse cx="84" cy="88" rx="7" ry="4" transform="rotate(-30 84 88)"/>
+  <ellipse cx="92" cy="80" rx="7" ry="4" transform="rotate(-15 92 80)"/>
+  <ellipse cx="102" cy="76" rx="7" ry="4"/>
+  <ellipse cx="112" cy="76" rx="7" ry="4"/>
+  <ellipse cx="122" cy="78" rx="7" ry="4" transform="rotate(15 122 78)"/>
+  <ellipse cx="130" cy="86" rx="7" ry="4" transform="rotate(30 130 86)"/>
+  <ellipse cx="136" cy="94" rx="7" ry="4" transform="rotate(45 136 94)"/>
+</g>
+<!-- Sceptre / staff -->
+<rect x="148" y="80" width="5" height="200" fill="#b07830"/>
+<circle cx="150" cy="78" r="8" fill="#c8a030"/>
+<!-- Purple stripe on toga (senatorial) -->
+<path d="M104 148 L106 260" stroke="#5a1060" stroke-width="6" opacity="0.7"/>
+<!-- Shield arm left -->
+<ellipse cx="72" cy="188" rx="20" ry="28" fill="#8a5020" stroke="#c8a030" stroke-width="2"/>
+<ellipse cx="72" cy="188" rx="12" ry="18" fill="#9a6030"/>
+<!-- Text -->
+<text x="110" y="292" text-anchor="middle" fill="#6a3010" font-size="11" font-family="Georgia,serif" font-style="italic">Augustus Caesar</text>
+</svg>`;
+
+// Roman goddess fresco
+const SVG_GODDESS=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 300">
+<rect width="220" height="300" fill="#c8b080"/>
+<rect x="0" y="0" width="220" height="300" fill="#d4bc8c" opacity="0.5"/>
+<rect x="0" y="240" width="220" height="60" fill="#b8a060"/>
+<!-- Sky -->
+<rect x="0" y="0" width="220" height="140" fill="#9ab0d0" opacity="0.4"/>
+<!-- Temple columns background -->
+<rect x="30" y="30" width="14" height="160" fill="#d4c090" opacity="0.6"/>
+<rect x="170" y="30" width="14" height="160" fill="#d4c090" opacity="0.6"/>
+<rect x="30" y="30" width="160" height="12" fill="#d4c090" opacity="0.7"/>
+<!-- Figure -->
+<path d="M75 158 Q90 135 110 138 Q130 135 145 158 Q155 200 148 265 Q110 274 72 265 Z" fill="#f0ece0"/>
+<!-- Palla (outer garment) drape -->
+<path d="M148 158 Q162 170 158 220 Q152 250 148 265 L148 158" fill="#c0a0d8" opacity="0.8"/>
+<!-- Belt/girdle -->
+<rect x="88" y="160" width="44" height="8" fill="#c89030" rx="2"/>
+<!-- Head -->
+<ellipse cx="110" cy="104" rx="28" ry="32" fill="#d4a870"/>
+<!-- Face -->
+<ellipse cx="101" cy="101" rx="4" ry="3.5" fill="#7a4028"/>
+<ellipse cx="119" cy="101" rx="4" ry="3.5" fill="#7a4028"/>
+<path d="M99 112 Q110 118 121 112" fill="none" stroke="#8a4028" stroke-width="1.5"/>
+<path d="M96 94 Q101 89 106 92" fill="none" stroke="#7a4028" stroke-width="1"/>
+<path d="M114 92 Q119 89 124 94" fill="none" stroke="#7a4028" stroke-width="1"/>
+<!-- Hair piled up -->
+<ellipse cx="110" cy="80" rx="26" ry="16" fill="#4a2808"/>
+<ellipse cx="110" cy="74" rx="18" ry="10" fill="#5a3010"/>
+<!-- Diadem -->
+<path d="M84 82 Q110 72 136 82" fill="none" stroke="#c8a030" stroke-width="3"/>
+<circle cx="110" cy="72" r="5" fill="#c8a030"/>
+<!-- Torch in hand -->
+<rect x="148" y="100" width="5" height="130" fill="#8a5010"/>
+<path d="M148 100 Q155 86 162 100 Q155 108 148 100" fill="#ff8800"/>
+<circle cx="155" cy="94" r="8" fill="#ffcc00" opacity="0.8"/>
+<!-- Owl (Minerva attribute) -->
+<ellipse cx="70" cy="200" rx="12" ry="14" fill="#5a4828"/>
+<ellipse cx="66" cy="195" rx="4" ry="4" fill="#c8a030"/>
+<ellipse cx="74" cy="195" rx="4" ry="4" fill="#c8a030"/>
+<text x="110" y="292" text-anchor="middle" fill="#5a3010" font-size="11" font-family="Georgia,serif" font-style="italic">Minerva</text>
+</svg>`;
+
+// Roman battle scene fresco (landscape/narrative)
+const SVG_BATTLE=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 200">
+<rect width="300" height="200" fill="#c8a860"/>
+<!-- Sky -->
+<rect x="0" y="0" width="300" height="100" fill="#7898c0" opacity="0.5"/>
+<!-- Hills -->
+<ellipse cx="50" cy="110" rx="70" ry="40" fill="#708050" opacity="0.6"/>
+<ellipse cx="250" cy="105" rx="80" ry="45" fill="#607040" opacity="0.6"/>
+<!-- Ground -->
+<rect x="0" y="120" width="300" height="80" fill="#8a7040"/>
+<!-- Roman soldiers left -->
+<g fill="#c0a040">
+  <rect x="20" y="80" width="8" height="50" fill="#8a8080"/><!-- shield -->
+  <circle cx="24" cy="76" r="10" fill="#d4a860"/><!-- helmet -->
+  <rect x="28" y="90" width="3" height="60" fill="#9a7020"/><!-- spear -->
+  <rect x="50" y="82" width="8" height="50" fill="#8a8080"/>
+  <circle cx="54" cy="78" r="10" fill="#d4a860"/>
+  <rect x="58" y="92" width="3" height="58" fill="#9a7020"/>
+  <rect x="80" y="84" width="8" height="50" fill="#8a8080"/>
+  <circle cx="84" cy="80" r="10" fill="#d4a860"/>
+  <rect x="88" y="94" width="3" height="56" fill="#9a7020"/>
+</g>
+<!-- Eagle standard -->
+<rect x="38" y="40" width="3" height="70" fill="#9a7020"/>
+<circle cx="39" cy="36" r="8" fill="#c8a030"/>
+<!-- Enemy soldiers right -->
+<g fill="#6a4020">
+  <rect x="200" y="82" width="8" height="48" fill="#6a8060"/>
+  <circle cx="204" cy="78" r="10" fill="#5a6030"/>
+  <rect x="190" y="84" width="3" height="58" fill="#8a5010"/>
+  <rect x="228" y="84" width="8" height="48" fill="#6a8060"/>
+  <circle cx="232" cy="80" r="10" fill="#5a6030"/>
+  <rect x="218" y="86" width="3" height="56" fill="#8a5010"/>
+</g>
+<!-- Flying spears -->
+<line x1="100" y1="100" x2="180" y2="105" stroke="#7a5010" stroke-width="2"/>
+<line x1="110" y1="92" x2="195" y2="88" stroke="#7a5010" stroke-width="2"/>
+<!-- Temple in background -->
+<rect x="130" y="50" width="50" height="60" fill="#d4c090" opacity="0.5"/>
+<rect x="125" y="46" width="60" height="10" fill="#d4c090" opacity="0.6"/>
+<rect x="132" y="46" width="5" height="60" fill="#c8b080" opacity="0.5"/>
+<rect x="145" y="46" width="5" height="60" fill="#c8b080" opacity="0.5"/>
+<rect x="158" y="46" width="5" height="60" fill="#c8b080" opacity="0.5"/>
+<text x="150" y="192" text-anchor="middle" fill="#5a3010" font-size="11" font-family="Georgia,serif" font-style="italic">Triumph of Rome</text>
+</svg>`;
+
+// Roman ceiling — coffered with gold rosettes
+const SVG_ROMAN_CEILING=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 300">
+<rect width="300" height="300" fill="#c8a860"/>
+<!-- Coffered grid -->
+<g stroke="#8a5a20" stroke-width="3" fill="none">
+  <rect x="10" y="10" width="280" height="280"/>
+  <rect x="30" y="30" width="240" height="240"/>
+  <!-- Coffer lines -->
+  <line x1="130" y1="10" x2="130" y2="290"/>
+  <line x1="170" y1="10" x2="170" y2="290"/>
+  <line x1="10" y1="130" x2="290" y2="130"/>
+  <line x1="10" y1="170" x2="290" y2="170"/>
+</g>
+<!-- Gold coffer insets -->
+<rect x="32" y="32" width="96" height="96" fill="#d4b040" opacity="0.4"/>
+<rect x="172" y="32" width="96" height="96" fill="#d4b040" opacity="0.4"/>
+<rect x="32" y="172" width="96" height="96" fill="#d4b040" opacity="0.4"/>
+<rect x="172" y="172" width="96" height="96" fill="#d4b040" opacity="0.4"/>
+<rect x="132" y="132" width="36" height="36" fill="#d4b040" opacity="0.5"/>
+<!-- Rosettes in each coffer -->
+<g fill="#c89030">
+  <circle cx="80" cy="80" r="18"/><circle cx="80" cy="80" r="10" fill="#e8c040"/>
+  <circle cx="220" cy="80" r="18"/><circle cx="220" cy="80" r="10" fill="#e8c040"/>
+  <circle cx="80" cy="220" r="18"/><circle cx="80" cy="220" r="10" fill="#e8c040"/>
+  <circle cx="220" cy="220" r="18"/><circle cx="220" cy="220" r="10" fill="#e8c040"/>
+  <circle cx="150" cy="150" r="22"/><circle cx="150" cy="150" r="13" fill="#e8c040"/>
+</g>
+<!-- Petal details -->
+<g fill="#e8c040" opacity="0.7">
+  <ellipse cx="80" cy="62" rx="5" ry="8"/><ellipse cx="80" cy="98" rx="5" ry="8"/>
+  <ellipse cx="62" cy="80" rx="8" ry="5"/><ellipse cx="98" cy="80" rx="8" ry="5"/>
+  <ellipse cx="220" cy="62" rx="5" ry="8"/><ellipse cx="220" cy="98" rx="5" ry="8"/>
+  <ellipse cx="202" cy="80" rx="8" ry="5"/><ellipse cx="238" cy="80" rx="8" ry="5"/>
+</g>
+</svg>`;
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById("fadeOverlay");if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x1a1410);
+  scene.fog=new THREE.FogExp2(0x1a1410,0.0003);
+  camera=new THREE.PerspectiveCamera(72,window.innerWidth/window.innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Balanced Roman lighting — neutral fill + warm torch accents
+  scene.add(new THREE.AmbientLight(0x887060,0.9));  // warm-neutral, not orange
+  const fillLight=new THREE.DirectionalLight(0xfff0e0,0.5);fillLight.position.set(0,1,0.5);scene.add(fillLight);
+  const brazierLight1=new THREE.PointLight(0xff9030,1.0,700);brazierLight1.position.set(-RW/3,180*S,0);scene.add(brazierLight1);
+  const brazierLight2=new THREE.PointLight(0xff9030,1.0,700);brazierLight2.position.set(RW/3,180*S,0);scene.add(brazierLight2);
+  const brazierLight3=new THREE.PointLight(0xff7820,0.8,500);brazierLight3.position.set(0,180*S,-RD/3);scene.add(brazierLight3);
+  const fire=new THREE.PointLight(0xff6600,1.2,300);fire.position.set(0,120*S,-RD/2+80*S);scene.add(fire);
+  const fire2=new THREE.PointLight(0xff4400,0.6,180);fire2.position.set(0,60*S,-RD/2+60*S);scene.add(fire2);
+
+  buildRoom();
+  buildDebug();
+
+  const saved=localStorage.getItem(STORAGE_KEY);
+  if(saved){try{const d=JSON.parse(saved);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}}catch(err){}}
+
+  document.getElementById("editBtn").addEventListener("click",toggleEditMode);
+  document.getElementById("saveBtn").addEventListener("click",saveLayout);
+  document.getElementById("loadBtn").addEventListener("click",loadLayout);
+  document.getElementById("clearBtn").addEventListener("click",clearSave);
+  renderer.domElement.addEventListener("click",onMouseClick);
+  document.addEventListener("keydown",onKeyDown);
+  document.addEventListener("keyup",onKeyUp);
+  window.addEventListener("resize",onResize);
+  camera.position.set(0,240*S,RD/2-150*S);
+  yaw=0;updateRotation();animate();
+}
+
+function buildRoom(){
+  // ── Materials ──
+  const marbleWhite =new THREE.MeshLambertMaterial({color:0xe8e0d4});
+  const marbleGrey  =new THREE.MeshLambertMaterial({color:0xc0b8ac});
+  const marbleDark  =new THREE.MeshLambertMaterial({color:0x9a8878});
+  const marbleVein  =new THREE.MeshLambertMaterial({color:0xb8a898});
+  const marbleGreen =new THREE.MeshLambertMaterial({color:0x5a7058});
+  const goldMat     =new THREE.MeshLambertMaterial({color:0xc8960c});
+  const goldDark    =new THREE.MeshLambertMaterial({color:0x8a6008});
+  const terracotta  =new THREE.MeshLambertMaterial({color:0xb84820});
+  const terracottaL =new THREE.MeshLambertMaterial({color:0xd06030});
+  const ochre       =new THREE.MeshLambertMaterial({color:0xc89040});
+  const fresco      =new THREE.MeshLambertMaterial({color:0xc8a870});
+  const frescoRed   =new THREE.MeshLambertMaterial({color:0x9a1818});
+  const darkStone   =new THREE.MeshLambertMaterial({color:0x2a2018});
+  const ironMat     =new THREE.MeshLambertMaterial({color:0x1a1614});
+  const bronzeMat   =new THREE.MeshLambertMaterial({color:0x7a5018});
+  const purpleMat   =new THREE.MeshLambertMaterial({color:0x501860});
+  const creamMat    =new THREE.MeshLambertMaterial({color:0xe8dfc8});
+  const flameMat    =new THREE.MeshLambertMaterial({color:0xffaa00,emissive:0xff6600,emissiveIntensity:1.2});
+  const emberMat    =new THREE.MeshLambertMaterial({color:0xff3300,emissive:0xaa1100,emissiveIntensity:1});
+  const waterMat    =new THREE.MeshLambertMaterial({color:0x203850,transparent:true,opacity:0.75});
+  const woodMat     =new THREE.MeshLambertMaterial({color:0x5a3010});
+
+  // ── MARBLE TILE FLOOR ──
+  const floor=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),new THREE.MeshLambertMaterial({color:0x6a6058}));floor.rotation.x=-Math.PI/2;scene.add(floor);
+  // Large marble tiles alternating dark stone colours
+  const tSz=80*S;
+  for(let ix=0;ix<Math.ceil(RW/tSz);ix++)for(let iz=0;iz<Math.ceil(RD/tSz);iz++){
+    const c=(ix+iz)%2===0?0x7a7060:0x605850;
+    const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-3,2*S,tSz-3),new THREE.MeshLambertMaterial({color:c}));
+    t.position.set(-RW/2+tSz*(ix+0.5),1*S,-RD/2+tSz*(iz+0.5));scene.add(t);
+  }
+  // Mosaic border around floor edges
+  const mosBorderMat=new THREE.MeshLambertMaterial({color:0x6a3010});
+  [-1,1].forEach(s=>{
+    const mb=new THREE.Mesh(new THREE.BoxGeometry(RW,3*S,30*S),mosBorderMat);mb.position.set(0,2*S,s*(RD/2-15*S));scene.add(mb);
+    const mb2=new THREE.Mesh(new THREE.BoxGeometry(30*S,3*S,RD),mosBorderMat);mb2.position.set(s*(RW/2-15*S),2*S,0);scene.add(mb2);
+  });
+  // Mosaic panel in centre
+  const mosG=new THREE.Group();
+  const mosBg=new THREE.Mesh(new THREE.BoxGeometry(360*S,3*S,360*S),mosBorderMat);mosBg.position.y=0;mosG.add(mosBg);
+  const mosFace=new THREE.Mesh(new THREE.PlaneGeometry(340*S,340*S),makeSVGTexture(SVG_MOSAIC,512,512));mosFace.rotation.x=-Math.PI/2;mosFace.position.y=3*S;mosG.add(mosFace);
+  mosG.position.set(0,1.5*S,0);scene.add(mosG);
+
+  // ── COFFERED CEILING ──
+  const ceil=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),new THREE.MeshLambertMaterial({color:0xd4b870}));ceil.rotation.x=Math.PI/2;ceil.position.y=RH;scene.add(ceil);
+  // Coffered fresco panel
+  const ceilFresco=new THREE.Mesh(new THREE.PlaneGeometry(RW*0.65,RD*0.65),makeSVGTexture(SVG_ROMAN_CEILING,512,512));ceilFresco.rotation.x=Math.PI/2;ceilFresco.position.y=RH-2*S;scene.add(ceilFresco);
+  // Ceiling moulding — all 4 sides
+  for(let i=0;i<4;i++){const angle=i*Math.PI/2;const isLong=i%2===0;const m=new THREE.Mesh(new THREE.BoxGeometry(isLong?RW:RD,22*S,20*S),marbleWhite);m.rotation.y=angle;m.position.set(Math.sin(angle)*(isLong?0:RD/2-10*S),RH-11*S,Math.cos(angle)*(isLong?-RD/2+10*S:0));scene.add(m);const mg=new THREE.Mesh(new THREE.BoxGeometry(isLong?RW:RD,8*S,12*S),goldMat);mg.rotation.y=angle;mg.position.set(Math.sin(angle)*(isLong?0:RD/2-6*S),RH-26*S,Math.cos(angle)*(isLong?-RD/2+6*S:0));scene.add(mg);}
+
+  // ── FRESCO WALLS (Pompeian red panels) ──
+  // Back wall — divided into 3 fresco zones
+  // Pompeian red dado rail
+  const dado=new THREE.Mesh(new THREE.BoxGeometry(RW,120*S,12*S),frescoRed);dado.position.set(0,60*S,-RD/2+8*S);scene.add(dado);
+  const dadoTop=new THREE.Mesh(new THREE.BoxGeometry(RW,10*S,14*S),goldMat);dadoTop.position.set(0,122*S,-RD/2+8*S);scene.add(dadoTop);
+  const corniceBack=new THREE.Mesh(new THREE.BoxGeometry(RW,24*S,20*S),marbleWhite);corniceBack.position.set(0,RH-12*S,-RD/2+12*S);scene.add(corniceBack);
+  // Upper fresco zone back wall (ochre)
+  const frBackUpper=new THREE.Mesh(new THREE.BoxGeometry(RW,RH-160*S,8*S),new THREE.MeshLambertMaterial({color:0xc8a060}));frBackUpper.position.set(0,RH/2+20*S,-RD/2+5*S);scene.add(frBackUpper);
+  // Vertical pilaster dividers on back wall
+  [-RW/3,0,RW/3].forEach(px=>{
+    const pil=new THREE.Mesh(new THREE.BoxGeometry(28*S,RH-30*S,22*S),marbleWhite);pil.position.set(px,RH/2,-RD/2+12*S);scene.add(pil);
+    // Capital
+    const cap=new THREE.Mesh(new THREE.BoxGeometry(44*S,20*S,24*S),marbleWhite);cap.position.set(px,RH-22*S,-RD/2+12*S);scene.add(cap);
+    const capGold=new THREE.Mesh(new THREE.BoxGeometry(46*S,6*S,26*S),goldMat);capGold.position.set(px,RH-10*S,-RD/2+12*S);scene.add(capGold);
+    // Plinth at base
+    const base=new THREE.Mesh(new THREE.BoxGeometry(44*S,18*S,24*S),marbleWhite);base.position.set(px,10*S,-RD/2+12*S);scene.add(base);
+  });
+  // Side walls — Pompeian red + ochre
+  // Left wall — full length
+  const sdadoL=new THREE.Mesh(new THREE.BoxGeometry(14*S,120*S,RD),frescoRed);sdadoL.position.set(-(RW/2-8*S),60*S,0);scene.add(sdadoL);
+  const sdadoTopL=new THREE.Mesh(new THREE.BoxGeometry(14*S,10*S,RD),goldMat);sdadoTopL.position.set(-(RW/2-8*S),122*S,0);scene.add(sdadoTopL);
+  const scornicL=new THREE.Mesh(new THREE.BoxGeometry(20*S,24*S,RD),marbleWhite);scornicL.position.set(-(RW/2-12*S),RH-12*S,0);scene.add(scornicL);
+  const sfUpperL=new THREE.Mesh(new THREE.BoxGeometry(8*S,RH-160*S,RD),new THREE.MeshLambertMaterial({color:0xbe9850}));sfUpperL.position.set(-(RW/2-5*S),RH/2+20*S,0);scene.add(sfUpperL);
+  [-RD/4,RD/4].forEach(pz=>{
+    const pil=new THREE.Mesh(new THREE.BoxGeometry(22*S,RH-30*S,28*S),marbleWhite);pil.position.set(-(RW/2-12*S),RH/2,pz);scene.add(pil);
+    const cap=new THREE.Mesh(new THREE.BoxGeometry(24*S,20*S,44*S),marbleWhite);cap.position.set(-(RW/2-12*S),RH-22*S,pz);scene.add(cap);
+    const capG=new THREE.Mesh(new THREE.BoxGeometry(26*S,6*S,46*S),goldMat);capG.position.set(-(RW/2-12*S),RH-10*S,pz);scene.add(capG);
+  });
+  // Right wall — split around door opening at cdoorZ=RD/4, gap=cdW=220*S=110
+  const cdoorZw=RD/8, cdWw=220*S, cdHw=300*S;
+  const rWx=RW/2-8*S;
+  const rSegN_len=(RD/2-cdoorZw)-cdWw/2;
+  const rSegN_z=cdoorZw+cdWw/2+rSegN_len/2;
+  const rSegS_len=(cdoorZw+RD/2)-cdWw/2;
+  const rSegS_z=cdoorZw-cdWw/2-rSegS_len/2;
+  // dado (lower red band) — two segments
+  const rdN=new THREE.Mesh(new THREE.BoxGeometry(14*S,120*S,rSegN_len),frescoRed);rdN.position.set(rWx,60*S,rSegN_z);scene.add(rdN);
+  const rdS=new THREE.Mesh(new THREE.BoxGeometry(14*S,120*S,rSegS_len),frescoRed);rdS.position.set(rWx,60*S,rSegS_z);scene.add(rdS);
+  // above door full height strip
+  const rdAbove=new THREE.Mesh(new THREE.BoxGeometry(14*S,RH,cdWw+30*S),frescoRed);rdAbove.position.set(rWx,RH/2,cdoorZw);scene.add(rdAbove);
+  const rdAboveOchre=new THREE.Mesh(new THREE.BoxGeometry(8*S,RH-cdHw-20*S,cdWw+10*S),new THREE.MeshLambertMaterial({color:0xbe9850}));rdAboveOchre.position.set(RW/2-5*S,cdHw+20*S+(RH-cdHw-20*S)/2,cdoorZw);scene.add(rdAboveOchre);
+  // dado rail
+  const rdTN=new THREE.Mesh(new THREE.BoxGeometry(14*S,10*S,rSegN_len),goldMat);rdTN.position.set(rWx,122*S,rSegN_z);scene.add(rdTN);
+  const rdTS=new THREE.Mesh(new THREE.BoxGeometry(14*S,10*S,rSegS_len),goldMat);rdTS.position.set(rWx,122*S,rSegS_z);scene.add(rdTS);
+  // upper ochre — two segments
+  const ruN=new THREE.Mesh(new THREE.BoxGeometry(8*S,RH-160*S,rSegN_len),new THREE.MeshLambertMaterial({color:0xbe9850}));ruN.position.set(RW/2-5*S,RH/2+20*S,rSegN_z);scene.add(ruN);
+  const ruS=new THREE.Mesh(new THREE.BoxGeometry(8*S,RH-160*S,rSegS_len),new THREE.MeshLambertMaterial({color:0xbe9850}));ruS.position.set(RW/2-5*S,RH/2+20*S,rSegS_z);scene.add(ruS);
+  // cornice — two segments
+  const rcN=new THREE.Mesh(new THREE.BoxGeometry(20*S,24*S,rSegN_len),marbleWhite);rcN.position.set(RW/2-12*S,RH-12*S,rSegN_z);scene.add(rcN);
+  const rcS=new THREE.Mesh(new THREE.BoxGeometry(20*S,24*S,rSegS_len),marbleWhite);rcS.position.set(RW/2-12*S,RH-12*S,rSegS_z);scene.add(rcS);
+  // cornice above door
+  const rcAbove=new THREE.Mesh(new THREE.BoxGeometry(20*S,24*S,cdWw+30*S),marbleWhite);rcAbove.position.set(RW/2-12*S,RH-12*S,cdoorZw);scene.add(rcAbove);
+  // pilasters on right wall
+  [-RD/4,RD/4].forEach(pz=>{
+    const pil=new THREE.Mesh(new THREE.BoxGeometry(22*S,RH-30*S,28*S),marbleWhite);pil.position.set(RW/2-12*S,RH/2,pz);scene.add(pil);
+    const cap=new THREE.Mesh(new THREE.BoxGeometry(24*S,20*S,44*S),marbleWhite);cap.position.set(RW/2-12*S,RH-22*S,pz);scene.add(cap);
+    const capG=new THREE.Mesh(new THREE.BoxGeometry(26*S,6*S,46*S),goldMat);capG.position.set(RW/2-12*S,RH-10*S,pz);scene.add(capG);
+  });
+  // Front wall
+  const dGapW=220*S,fSideW=(RW-dGapW)/2;
+  const fL=new THREE.Mesh(new THREE.BoxGeometry(fSideW,RH,12*S),new THREE.MeshLambertMaterial({color:0xbe9850}));fL.position.set(-(dGapW/2+fSideW/2),RH/2,RD/2-6*S);scene.add(fL);
+  const fR=fL.clone();fR.position.x=dGapW/2+fSideW/2;scene.add(fR);
+  const fdado=new THREE.Mesh(new THREE.BoxGeometry(RW,120*S,12*S),frescoRed);fdado.position.set(0,60*S,RD/2-7*S);scene.add(fdado);
+  const fcornice=new THREE.Mesh(new THREE.BoxGeometry(RW,24*S,18*S),marbleWhite);fcornice.position.set(0,RH-12*S,RD/2-10*S);scene.add(fcornice);
+
+  // ── EXIT DOOR — Roman double door with proper frame ──
+  const dW=110*S,dH=340*S,doorZ=RD/2-8*S;
+  const exitDoorG=new THREE.Group();
+
+  // Marble jambs either side
+  [-1,1].forEach(s=>{
+    const jamb=new THREE.Mesh(new THREE.BoxGeometry(30*S,dH+20*S,20*S),marbleWhite);jamb.position.set(s*(dW+15*S),dH/2,0);exitDoorG.add(jamb);
+    const jbase=new THREE.Mesh(new THREE.BoxGeometry(34*S,18*S,22*S),marbleWhite);jbase.position.set(s*(dW+15*S),9*S,0);exitDoorG.add(jbase);
+  });
+  // Lintel across top
+  const lintEl=new THREE.Mesh(new THREE.BoxGeometry(dW*2+70*S,32*S,20*S),marbleWhite);lintEl.position.set(0,dH+16*S,0);exitDoorG.add(lintEl);
+  // Gold trim on lintel
+  const lintG=new THREE.Mesh(new THREE.BoxGeometry(dW*2+74*S,10*S,18*S),goldMat);lintG.position.set(0,dH+34*S,0);exitDoorG.add(lintG);
+  // Pediment above
+  const exitPed=new THREE.Mesh(new THREE.BoxGeometry(dW*2+80*S,18*S,18*S),marbleWhite);exitPed.position.set(0,dH+48*S,0);exitDoorG.add(exitPed);
+  // Keystone
+  const exitKs=new THREE.Mesh(new THREE.BoxGeometry(26*S,36*S,22*S),goldMat);exitKs.position.set(0,dH+62*S,0);exitDoorG.add(exitKs);
+  // Base plinth
+  const exitPl=new THREE.Mesh(new THREE.BoxGeometry(dW*2+70*S,16*S,20*S),marbleWhite);exitPl.position.set(0,8*S,0);exitDoorG.add(exitPl);
+
+  // Two door leaves — face Z axis (wall runs along X here, front wall)
+  [-1,1].forEach(s=>{
+    // Main door panel
+    const door=new THREE.Mesh(new THREE.BoxGeometry(dW-4*S,dH-4*S,14*S),woodMat);
+    door.position.set(s*dW/2,dH/2,0);exitDoorG.add(door);
+    // Four recessed panels
+    [0.13,0.36,0.61,0.84].forEach(h=>{
+      const pnl=new THREE.Mesh(new THREE.BoxGeometry(dW-24*S,dH*0.17,6*S),new THREE.MeshLambertMaterial({color:0x6a3808}));
+      pnl.position.set(s*dW/2,h*dH,8*S);exitDoorG.add(pnl);
+    });
+    // Iron studs — 3 columns x 4 rows
+    for(let r=0;r<4;r++)for(let c=0;c<3;c++){
+      const stud=new THREE.Mesh(new THREE.SphereGeometry(3.5*S,6,6),ironMat);
+      stud.position.set(s*dW/2+(c-1)*18*S,40*S+r*64*S,9*S);exitDoorG.add(stud);
+    }
+    // Bronze ring handle
+    const ring=new THREE.Mesh(new THREE.TorusGeometry(9*S,2.5*S,6,12),bronzeMat);
+    ring.position.set(s*(-14*S),dH*0.43,10*S);exitDoorG.add(ring);
+    // Hinge strips
+    [0.15,0.5,0.85].forEach(hy=>{
+      const hinge=new THREE.Mesh(new THREE.BoxGeometry(dW*0.5,5*S,8*S),ironMat);
+      hinge.position.set(s*(dW/2+dW*0.05),hy*dH,8*S);exitDoorG.add(hinge);
+    });
+  });
+
+  exitDoorG.position.set(0,0,doorZ);
+  addGroup(exitDoorG,"entrance_door");
+
+  // ── ROMAN ALTAR / LARARIUM — back wall centre ──
+  const altG=new THREE.Group();
+  const altBase=new THREE.Mesh(new THREE.BoxGeometry(300*S,30*S,160*S),marbleWhite);altBase.position.set(0,15*S,0);altG.add(altBase);
+  const altPlatform=new THREE.Mesh(new THREE.BoxGeometry(280*S,120*S,140*S),marbleGrey);altPlatform.position.set(0,90*S,0);altG.add(altPlatform);
+  const altTop=new THREE.Mesh(new THREE.BoxGeometry(320*S,24*S,180*S),marbleWhite);altTop.position.set(0,158*S,10*S);altG.add(altTop);
+  // Two flanking columns
+  [-1,1].forEach(s=>{
+    const col=new THREE.Mesh(new THREE.CylinderGeometry(16*S,18*S,280*S,14),marbleWhite);col.position.set(s*140*S,140*S,0);altG.add(col);
+    // Fluting lines
+    for(let f=0;f<8;f++){const fl=new THREE.Mesh(new THREE.BoxGeometry(2*S,280*S,1.5*S),marbleGrey);fl.rotation.y=f*Math.PI/4;fl.position.set(s*140*S,140*S,0);altG.add(fl);}
+    const cap=new THREE.Mesh(new THREE.BoxGeometry(42*S,20*S,42*S),marbleWhite);cap.position.set(s*140*S,284*S,0);altG.add(cap);
+    const capG=new THREE.Mesh(new THREE.BoxGeometry(44*S,8*S,44*S),goldMat);capG.position.set(s*140*S,296*S,0);altG.add(capG);
+  });
+  // Pediment/entablature
+  const entab=new THREE.Mesh(new THREE.BoxGeometry(320*S,30*S,42*S),marbleWhite);entab.position.set(0,296*S,0);altG.add(entab);
+  const pediment=new THREE.Mesh(new THREE.BoxGeometry(320*S,80*S,14*S),marbleWhite);pediment.position.set(0,330*S,0);altG.add(pediment);
+  // Triangular pediment shape
+  const pedTri=new THREE.Mesh(new THREE.CylinderGeometry(0,140*S,70*S,3),marbleWhite);pedTri.rotation.y=Math.PI/6;pedTri.position.set(0,326*S,0);altG.add(pedTri);
+  // Altar fires in front
+  [-1,0,1].forEach((ox,fi)=>{
+    const aBowl=new THREE.Mesh(new THREE.CylinderGeometry(12*S,8*S,10*S,12),bronzeMat);aBowl.position.set(ox*80*S,172*S,60*S);altG.add(aBowl);
+    const aFlame=new THREE.Mesh(new THREE.ConeGeometry(10*S,24*S,8),flameMat);aFlame.position.set(ox*80*S,190*S,60*S);altG.add(aFlame);
+    const aLight=new THREE.PointLight(0xffaa30,0.8,200);aLight.position.set(ox*80*S,200*S,60*S);altG.add(aLight);
+  });
+  // Bronze eagle statue on altar top
+  const eagleBody=new THREE.Mesh(new THREE.CylinderGeometry(16*S,12*S,30*S,8),bronzeMat);eagleBody.position.set(0,182*S,-20*S);altG.add(eagleBody);
+  const eagleHead=new THREE.Mesh(new THREE.SphereGeometry(10*S,8,8),bronzeMat);eagleHead.position.set(0,202*S,-20*S);altG.add(eagleHead);
+  const eagleWingL=new THREE.Mesh(new THREE.BoxGeometry(60*S,8*S,28*S),bronzeMat);eagleWingL.position.set(-36*S,194*S,-20*S);eagleWingL.rotation.z=0.4;altG.add(eagleWingL);
+  const eagleWingR=new THREE.Mesh(new THREE.BoxGeometry(60*S,8*S,28*S),bronzeMat);eagleWingR.position.set(36*S,194*S,-20*S);eagleWingR.rotation.z=-0.4;altG.add(eagleWingR);
+  altG.position.set(0,0,-RD/2+90*S);
+  addGroup(altG,"lararium");
+
+  // ── IMPLUVIUM (central reflecting pool) ──
+  const impG=new THREE.Group();
+  // Stone surround
+  const impSurround=new THREE.Mesh(new THREE.BoxGeometry(320*S,16*S,320*S),marbleWhite);impSurround.position.y=8*S;impG.add(impSurround);
+  const impInner=new THREE.Mesh(new THREE.BoxGeometry(278*S,14*S,278*S),new THREE.MeshLambertMaterial({color:0x2a3040}));impInner.position.y=7*S;impG.add(impInner);
+  const water=new THREE.Mesh(new THREE.PlaneGeometry(268*S,268*S),waterMat);water.rotation.x=-Math.PI/2;water.position.y=14.5*S;impG.add(water);
+  // Mosaic rim edge
+  const impRimMat=new THREE.MeshLambertMaterial({color:0x7a4020});
+  [-1,1].forEach(s=>{
+    const r1=new THREE.Mesh(new THREE.BoxGeometry(320*S,20*S,12*S),impRimMat);r1.position.set(0,19*S,s*154*S);impG.add(r1);
+    const r2=new THREE.Mesh(new THREE.BoxGeometry(12*S,20*S,320*S),impRimMat);r2.position.set(s*154*S,19*S,0);impG.add(r2);
+  });
+  // Small fountain jet base
+  const jetBase=new THREE.Mesh(new THREE.CylinderGeometry(14*S,18*S,20*S,12),marbleWhite);jetBase.position.set(0,22*S,0);impG.add(jetBase);
+  const jetTop=new THREE.Mesh(new THREE.CylinderGeometry(6*S,6*S,40*S,8),marbleWhite);jetTop.position.set(0,50*S,0);impG.add(jetTop);
+  const jetBowl=new THREE.Mesh(new THREE.CylinderGeometry(22*S,14*S,12*S,12),marbleWhite);jetBowl.position.set(0,76*S,0);impG.add(jetBowl);
+  impG.position.set(0,0,RD/8);
+  addGroup(impG,"impluvium");
+
+  // ── FOUR MARBLE COLUMNS flanking impluvium ──
+  const colH=RH*0.85;
+  [[-220*S,-220*S],[220*S,-220*S],[-220*S,220*S],[220*S,220*S]].forEach(([cx,cz],ci)=>{
+    const colG=new THREE.Group();
+    // Plinth
+    const plinth=new THREE.Mesh(new THREE.BoxGeometry(52*S,24*S,52*S),marbleWhite);plinth.position.set(0,12*S,0);colG.add(plinth);
+    // Shaft — alternating marble colours
+    const shaftCol=ci%2===0?marbleWhite:marbleGreen;
+    const shaft=new THREE.Mesh(new THREE.CylinderGeometry(18*S,20*S,colH,16),shaftCol);shaft.position.set(0,colH/2+24*S,0);colG.add(shaft);
+    // Fluting
+    for(let f=0;f<12;f++){const fl=new THREE.Mesh(new THREE.BoxGeometry(1.5*S,colH-10*S,1.5*S),new THREE.MeshLambertMaterial({color:ci%2===0?0xd0c8bc:0x4a6048}));fl.rotation.y=f*Math.PI/6;fl.position.set(0,colH/2+24*S,0);colG.add(fl);}
+    // Capital (Corinthian-ish)
+    const capBase=new THREE.Mesh(new THREE.CylinderGeometry(20*S,18*S,20*S,12),marbleWhite);capBase.position.set(0,colH+34*S,0);colG.add(capBase);
+    const capAbacus=new THREE.Mesh(new THREE.BoxGeometry(50*S,14*S,50*S),marbleWhite);capAbacus.position.set(0,colH+50*S,0);colG.add(capAbacus);
+    const capGold=new THREE.Mesh(new THREE.BoxGeometry(52*S,5*S,52*S),goldMat);capGold.position.set(0,colH+58*S,0);colG.add(capGold);
+    colG.position.set(cx,0,cz+RD/8);
+    addGroup(colG,"column_"+(ci+1));
+  });
+
+  // ── ROMAN LECTUS (couch/bed) — against left wall ──
+  const bedG=new THREE.Group();
+  const bW=380*S,bL=520*S,bH=60*S;
+  const bedPlatform=new THREE.Mesh(new THREE.BoxGeometry(bW+20*S,bH,bL+20*S),marbleWhite);bedPlatform.position.set(0,bH/2,0);bedG.add(bedPlatform);
+  const bedGoldTrim=new THREE.Mesh(new THREE.BoxGeometry(bW+22*S,8*S,bL+22*S),goldMat);bedGoldTrim.position.set(0,bH-2*S,0);bedG.add(bedGoldTrim);
+  const mattress=new THREE.Mesh(new THREE.BoxGeometry(bW,20*S,bL),creamMat);mattress.position.set(0,bH+10*S,0);bedG.add(mattress);
+  // Purple imperial coverlet
+  const coverlet=new THREE.Mesh(new THREE.BoxGeometry(bW-8*S,14*S,bL*0.6),purpleMat);coverlet.position.set(0,bH+24*S,bL*0.1);bedG.add(coverlet);
+  const goldTrimCover=new THREE.Mesh(new THREE.BoxGeometry(bW-8*S,5*S,8*S),goldMat);goldTrimCover.position.set(0,bH+32*S,-bL*0.2);bedG.add(goldTrimCover);
+  // Headboard — carved marble slab
+  const hb=new THREE.Mesh(new THREE.BoxGeometry(bW+10*S,240*S,22*S),marbleGrey);hb.position.set(0,bH+120*S,-bL/2-10*S);bedG.add(hb);
+  const hbGold=new THREE.Mesh(new THREE.BoxGeometry(bW+14*S,244*S,10*S),goldDark);hbGold.position.set(0,bH+120*S,-bL/2+4*S);bedG.add(hbGold);
+  // Carved relief on headboard (terracotta panel)
+  const hbRelief=new THREE.Mesh(new THREE.BoxGeometry(bW-30*S,180*S,10*S),terracottaL);hbRelief.position.set(0,bH+120*S,-bL/2+5*S);bedG.add(hbRelief);
+  // Four turned wooden legs
+  [[-bW/2+18*S,bL/2-18*S],[bW/2-18*S,bL/2-18*S],[-bW/2+18*S,-bL/2+18*S],[bW/2-18*S,-bL/2+18*S]].forEach(([lx,lz])=>{
+    const leg=new THREE.Mesh(new THREE.CylinderGeometry(8*S,10*S,bH,10),woodMat);leg.position.set(lx,bH/2,lz);bedG.add(leg);
+    const capLeg=new THREE.Mesh(new THREE.CylinderGeometry(13*S,13*S,6*S,10),goldDark);capLeg.position.set(lx,bH-2*S,lz);bedG.add(capLeg);
+  });
+  // Bolster pillows
+  [-1,0,1].forEach(pi=>{const p=new THREE.Mesh(new THREE.BoxGeometry(110*S,18*S,60*S),creamMat);p.position.set(pi*118*S,bH+30*S,-bL/2+38*S);bedG.add(p);});
+  bedG.position.set(-RW/2+bW/2+50*S,0,-RD/4);
+  addGroup(bedG,"lectus");
+
+  // ── ROMAN BRAZIERS — floor standing torch stands ──
+  [-RW/3,RW/3].forEach((bx,bi)=>{
+    const brG=new THREE.Group();
+    // Central pole
+    const brLeg=new THREE.Mesh(new THREE.CylinderGeometry(4*S,5*S,240*S,8),ironMat);brLeg.position.set(0,120*S,0);brG.add(brLeg);
+    // Three splayed feet radiating out
+    for(let f=0;f<3;f++){
+      const footAngle=f*(Math.PI*2/3);
+      const fx=Math.cos(footAngle)*28*S,fz=Math.sin(footAngle)*28*S;
+      const foot=new THREE.Mesh(new THREE.CylinderGeometry(3*S,4*S,50*S,6),ironMat);
+      foot.position.set(fx/2,14*S,fz/2);
+      foot.rotation.z=Math.atan2(14*S,Math.sqrt(fx*fx+fz*fz))*-Math.sign(fx||1);
+      foot.rotation.y=-footAngle;
+      brG.add(foot);
+      // Foot pad
+      const pad=new THREE.Mesh(new THREE.CylinderGeometry(5*S,6*S,6*S,6),ironMat);pad.position.set(fx,3*S,fz);brG.add(pad);
+    }
+    const bowl=new THREE.Mesh(new THREE.CylinderGeometry(28*S,18*S,20*S,12),bronzeMat);bowl.position.set(0,250*S,0);brG.add(bowl);
+    const rim=new THREE.Mesh(new THREE.TorusGeometry(28*S,4*S,8,12),bronzeMat);rim.rotation.x=Math.PI/2;rim.position.set(0,261*S,0);brG.add(rim);
+    // Fire
+    for(let fi=0;fi<5;fi++){const fc=new THREE.Mesh(new THREE.ConeGeometry(6*S+fi*2*S,22*S+fi*6*S,6),flameMat);fc.position.set((fi-2)*7*S,278*S+fi*3*S,0);brG.add(fc);}
+    const bLight=new THREE.PointLight(0xffaa30,1.5,350);bLight.position.set(0,290*S,0);brG.add(bLight);
+    brG.position.set(bx,0,0);
+    addGroup(brG,"brazier_"+(bi+1));
+  });
+
+  // ── SITTING AREA — Roman curule chairs ──
+  [-1,1].forEach((s,i)=>{
+    const cg=new THREE.Group();
+    // Curule X-frame legs
+    [-1,1].forEach(cx=>{
+      const legA=new THREE.Mesh(new THREE.CylinderGeometry(5*S,5*S,100*S,8),bronzeMat);legA.rotation.z=0.5*s;legA.position.set(cx*30*S,50*S,0);cg.add(legA);
+      const legB=new THREE.Mesh(new THREE.CylinderGeometry(5*S,5*S,100*S,8),bronzeMat);legB.rotation.z=-0.5*s;legB.position.set(cx*30*S,50*S,0);cg.add(legB);
+    });
+    const seatRail=new THREE.Mesh(new THREE.BoxGeometry(100*S,8*S,90*S),bronzeMat);seatRail.position.set(0,72*S,0);cg.add(seatRail);
+    const cushion=new THREE.Mesh(new THREE.BoxGeometry(94*S,12*S,84*S),purpleMat);cushion.position.set(0,80*S,0);cg.add(cushion);
+    const goldEdge=new THREE.Mesh(new THREE.BoxGeometry(96*S,5*S,8*S),goldMat);goldEdge.position.set(0,87*S,44*S);cg.add(goldEdge);
+    // High back
+    const back=new THREE.Mesh(new THREE.BoxGeometry(100*S,140*S,12*S),woodMat);back.position.set(0,148*S,-40*S);cg.add(back);
+    const backTop=new THREE.Mesh(new THREE.CylinderGeometry(14*S,14*S,8*S,8),bronzeMat);backTop.rotation.x=Math.PI/2;backTop.position.set(0,222*S,-40*S);cg.add(backTop);
+    // Carved panel
+    const panel=new THREE.Mesh(new THREE.BoxGeometry(80*S,110*S,6*S),terracotta);panel.position.set(0,148*S,-33*S);cg.add(panel);
+    cg.position.set(RW/2-200*S,0,s*160*S);cg.rotation.y=-Math.PI/2;
+    addGroup(cg,"curule_"+(i+1));
+  });
+
+  // ── SIDE TABLE — marble top on bronze legs ──
+  const tG=new THREE.Group();
+  const tTop=new THREE.Mesh(new THREE.BoxGeometry(130*S,14*S,80*S),marbleWhite);tTop.position.set(0,90*S,0);tG.add(tTop);
+  const tEdge=new THREE.Mesh(new THREE.BoxGeometry(134*S,8*S,84*S),goldMat);tEdge.position.set(0,83*S,0);tG.add(tEdge);
+  [[-52*S,30*S],[52*S,30*S],[-52*S,-30*S],[52*S,-30*S]].forEach(([lx,lz])=>{const l=new THREE.Mesh(new THREE.CylinderGeometry(7*S,9*S,78*S,10),bronzeMat);l.position.set(lx,39*S,lz);tG.add(l);});
+  // Wine amphora on table
+  const ampBody=new THREE.Mesh(new THREE.CylinderGeometry(14*S,8*S,50*S,10),terracotta);ampBody.position.set(0,120*S,0);tG.add(ampBody);
+  const ampNeck=new THREE.Mesh(new THREE.CylinderGeometry(6*S,12*S,18*S,8),terracotta);ampNeck.position.set(0,150*S,0);tG.add(ampNeck);
+  const ampMouth=new THREE.Mesh(new THREE.CylinderGeometry(8*S,6*S,8*S,8),terracottaL);ampMouth.position.set(0,162*S,0);tG.add(ampMouth);
+  tG.position.set(RW/2-200*S,0,0);
+  addGroup(tG,"side_table");
+
+  // ── ROMAN RUG / WOVEN TEXTILE ──
+  const rugG=new THREE.Group();
+  const rugBase=new THREE.Mesh(new THREE.BoxGeometry(450*S,3*S,280*S),new THREE.MeshLambertMaterial({color:0x6a1808}));rugBase.position.y=1.5*S;rugG.add(rugBase);
+  const rugField=new THREE.Mesh(new THREE.BoxGeometry(430*S,3*S,260*S),new THREE.MeshLambertMaterial({color:0x8a2010}));rugField.position.y=4*S;rugG.add(rugField);
+  // Gold border
+  [-1,1].forEach(s=>{
+    const b1=new THREE.Mesh(new THREE.BoxGeometry(430*S,5*S,12*S),goldDark);b1.position.set(0,4.5*S,s*124*S);rugG.add(b1);
+    const b2=new THREE.Mesh(new THREE.BoxGeometry(12*S,5*S,260*S),goldDark);b2.position.set(s*209*S,4.5*S,0);rugG.add(b2);
+  });
+  rugG.position.set(RW/2-200*S,0,0);
+  addGroup(rugG,"rug");
+
+  // ── FRESCO PAINTINGS (in marble frames) ──
+  function makePainting(svgStr,fw,fh,id,pos,rotY){
+    const pg=new THREE.Group();
+    // Marble outer frame — deepest
+    const outer=new THREE.Mesh(new THREE.BoxGeometry(fw+50*S,fh+50*S,16*S),marbleWhite);outer.position.z=-2*S;pg.add(outer);
+    // Gold middle — slightly in front
+    const middle=new THREE.Mesh(new THREE.BoxGeometry(fw+32*S,fh+32*S,14*S),goldDark);middle.position.z=0;pg.add(middle);
+    // Inner marble liner
+    const inner=new THREE.Mesh(new THREE.BoxGeometry(fw+14*S,fh+14*S,12*S),marbleGrey);inner.position.z=1*S;pg.add(inner);
+    // Corner acanthus bosses
+    [[1,1],[-1,1],[1,-1],[-1,-1]].forEach(([cx,cy])=>{const boss=new THREE.Mesh(new THREE.CylinderGeometry(9*S,9*S,20*S,8),goldMat);boss.position.set(cx*(fw/2+16*S),cy*(fh/2+16*S),0);pg.add(boss);});
+    // Canvas face — well proud of all frame geometry
+    const face=new THREE.Mesh(new THREE.PlaneGeometry(fw,fh),makeSVGTexture(svgStr,512,Math.round(512*fh/fw)));face.position.z=8*S;pg.add(face);
+    pg.position.copy(pos);if(rotY!==undefined)pg.rotation.y=rotY;
+    addGroup(pg,id);
+  }
+  makePainting(SVG_EMPEROR,110*S,148*S,"fresco_emperor",new THREE.Vector3(-RW/4,320*S,-RD/2+20*S));
+  makePainting(SVG_GODDESS,110*S,148*S,"fresco_goddess",new THREE.Vector3(RW/4,320*S,-RD/2+20*S));
+  makePainting(SVG_BATTLE,150*S,100*S,"fresco_battle",new THREE.Vector3(-RW/2+16*S,300*S,RD/4),Math.PI/2);
+
+  // ── DRESSING ROOM DOOR — right wall (wall runs along Z axis) ──
+  const cdoorZ=RD/8;
+  const cdW=220*S, cdH=300*S, cdThick=16*S;
+
+  
+
+  // Marble frame proud of wall face
+  const cdG=new THREE.Group();
+  const jS=new THREE.Mesh(new THREE.BoxGeometry(30*S,cdHw+8*S,26*S),marbleWhite);jS.position.set(RW/2-15*S,cdHw/2,cdoorZw-cdWw/2-13*S);cdG.add(jS);
+  const jN=new THREE.Mesh(new THREE.BoxGeometry(30*S,cdHw+8*S,26*S),marbleWhite);jN.position.set(RW/2-15*S,cdHw/2,cdoorZw+cdWw/2+13*S);cdG.add(jN);
+  const lintel=new THREE.Mesh(new THREE.BoxGeometry(30*S,30*S,cdWw+52*S),marbleWhite);lintel.position.set(RW/2-15*S,cdHw+15*S,cdoorZw);cdG.add(lintel);
+  const lintelG=new THREE.Mesh(new THREE.BoxGeometry(24*S,10*S,cdWw+56*S),goldMat);lintelG.position.set(RW/2-12*S,cdHw+32*S,cdoorZw);cdG.add(lintelG);
+  const cdPed=new THREE.Mesh(new THREE.BoxGeometry(22*S,16*S,cdWw+64*S),marbleWhite);cdPed.position.set(RW/2-11*S,cdHw+46*S,cdoorZw);cdG.add(cdPed);
+  const ks=new THREE.Mesh(new THREE.BoxGeometry(24*S,32*S,26*S),goldMat);ks.position.set(RW/2-12*S,cdHw+58*S,cdoorZw);cdG.add(ks);
+  const pl=new THREE.Mesh(new THREE.BoxGeometry(24*S,16*S,cdWw+52*S),marbleWhite);pl.position.set(RW/2-12*S,8*S,cdoorZw);cdG.add(pl);
+  scene.add(cdG);
+  addGroup(cdG,"closet_frame");
+
+  // Door leaves — static, placed directly in the opening
+  [-1,1].forEach(s=>{
+    const door=new THREE.Mesh(new THREE.BoxGeometry(cdThick,cdHw-4*S,cdWw/2-6*S),woodMat);
+    door.position.set(RW/2-cdThick/2,cdHw/2,cdoorZw+s*(cdWw/4));
+    scene.add(door);
+    // Recessed panels
+    [0.14,0.38,0.63,0.86].forEach(h=>{
+      const pnl=new THREE.Mesh(new THREE.BoxGeometry(cdThick+2,cdHw*0.16,cdWw/2-30*S),new THREE.MeshLambertMaterial({color:0x6a3808}));
+      pnl.position.set(RW/2-cdThick/2,h*cdHw,cdoorZw+s*(cdWw/4));scene.add(pnl);
+    });
+    // Bronze ring handle
+    const ring=new THREE.Mesh(new THREE.TorusGeometry(7*S,2*S,6,10),bronzeMat);
+    ring.rotation.z=Math.PI/2;
+    ring.position.set(RW/2-cdThick-2,cdHw*0.44,cdoorZw+s*12*S);scene.add(ring);
+    // Keep pivot for animation (closed position = no rotation)
+    const pivot=new THREE.Group();
+    pivot.position.set(RW/2-cdThick,0,cdoorZw+s*(cdWw/2));
+    scene.add(pivot);
+    closetDoorPivots.push({pivot,s});
+  });
+
+  // ── ROMAN CHANDELIER — suspended oil lamp ring ──
+  const chanG=new THREE.Group();
+  const chain=new THREE.Mesh(new THREE.CylinderGeometry(3*S,3*S,110*S,8),ironMat);chain.position.set(0,55*S,0);chanG.add(chain);
+  // Three rings of oil lamps
+  [80*S,50*S].forEach((r,tier)=>{
+    const lampCount=tier===0?10:6;
+    const ringMesh=new THREE.Mesh(new THREE.TorusGeometry(r,4*S,8,lampCount),bronzeMat);ringMesh.rotation.x=Math.PI/2;ringMesh.position.set(0,-tier*28*S,0);chanG.add(ringMesh);
+    for(let i=0;i<lampCount;i++){
+      const angle=i/lampCount*Math.PI*2;
+      const lampBody=new THREE.Mesh(new THREE.CylinderGeometry(7*S,5*S,10*S,8),bronzeMat);lampBody.position.set(Math.cos(angle)*r,-tier*28*S-6*S,Math.sin(angle)*r);chanG.add(lampBody);
+      const flame=new THREE.Mesh(new THREE.SphereGeometry(4*S,6,6),flameMat);flame.position.set(Math.cos(angle)*r,-tier*28*S+2*S,Math.sin(angle)*r);chanG.add(flame);
+      const lpt=new THREE.PointLight(0xffaa30,0.2,180);lpt.position.set(Math.cos(angle)*r,-tier*28*S+2*S,Math.sin(angle)*r);chanG.add(lpt);
+    }
+  });
+  chanG.position.set(0,RH-110*S,-RD/4);
+  addGroup(chanG,"chandelier");
+}
+
+function onResize(){camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);}
+function updateRotation(){camera.rotation.order="YXZ";camera.rotation.set(0,yaw,0);}
+
+const exitCooldown=(new URLSearchParams(window.location.search).get("from")==="floor2")?Date.now()+4000:0;
+let exitTriggered=false,nearExit=false;
+if(new URLSearchParams(window.location.search).get("from")==="closet"){
+  setTimeout(()=>{camera.position.set(RW/2-80*S,240*S,RD/8);yaw=Math.PI/2;updateRotation();},100);
+}
+
+function checkExitDoor(){
+  if(exitTriggered)return;if(Date.now()<exitCooldown)return;
+  nearExit=camera.position.x>-180*S&&camera.position.x<180*S&&camera.position.z>RD/2-200*S;
+  document.getElementById("doorHint").style.display=nearExit?"block":"none";
+}
+
+function checkClosetDoor(){
+  const dx=camera.position.x-RW/2+20*S;
+  const dz=camera.position.z-RD/8;
+  nearCloset=Math.sqrt(dx*dx+dz*dz)<180*S&&!closetTriggered;
+  const hint=document.getElementById("closetHint");
+  if(nearCloset&&!nearExit){hint.textContent="Press E — Enter Dressing Room";hint.style.display="block";}
+  else hint.style.display="none";
+}
+
+function animateClosetDoors(delta){}
+
+function onKeyDown(e){
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code))e.preventDefault();
+  if(e.code==="KeyM"){toggleEditMode();return;}
+  if(e.code==="KeyG"){toggleDebug();return;}
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if(e.code==="KeyE"){
+    if(nearCloset&&!nearExit){
+      closetTriggered=true;
+      document.getElementById("closetHint").style.display="none";
+      document.getElementById("exitFade").classList.add("show");
+      setTimeout(()=>window.location.href="romandressingroom.html?from=romansuite",600);
+      return;
+    }
+    if(nearExit&&!exitTriggered){
+      exitTriggered=true;
+      document.getElementById("doorHint").style.display="none";
+      document.getElementById("exitFade").classList.add("show");
+      setTimeout(()=>window.location.href="floor2.html?from=roman_suite",600);
+    }
+    return;
+  }
+  if(EDIT_MODE&&selectedObject){
+    if(e.code==="Delete"||e.code==="Backspace"){e.preventDefault();scene.remove(selectedObject);const idx=editableObjects.indexOf(selectedObject);if(idx>-1)editableObjects.splice(idx,1);showStatus("🗑 Deleted");selectedObject=null;document.getElementById("selInfo").style.display="none";return;}
+    const speed=e.shiftKey?1:8;
+    if(!e.shiftKey){if(e.code==="ArrowUp")selectedObject.position.z-=speed;if(e.code==="ArrowDown")selectedObject.position.z+=speed;if(e.code==="ArrowLeft")selectedObject.position.x-=speed;if(e.code==="ArrowRight")selectedObject.position.x+=speed;}
+    if(e.shiftKey&&e.code==="ArrowUp")selectedObject.position.y+=speed;
+    if(e.shiftKey&&e.code==="ArrowDown")selectedObject.position.y-=speed;
+    if(e.code==="KeyR")selectedObject.rotation.y+=e.shiftKey?0.05:0.1;
+    return;
+  }
+  if(!EDIT_MODE){
+    if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=true;
+    if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=true;
+    if(e.code==="ArrowLeft")turnLeft=true;
+    if(e.code==="ArrowRight")turnRight=true;
+  }
+}
+function onKeyUp(e){
+  if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=false;
+  if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=false;
+  if(e.code==="ArrowLeft")turnLeft=false;
+  if(e.code==="ArrowRight")turnRight=false;
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now(),delta=(now-prevTime)/1000;prevTime=now;
+  if(!EDIT_MODE){
+    if(turnLeft)yaw+=2.2*delta;if(turnRight)yaw-=2.2*delta;
+    const mv=Number(moveForward)-Number(moveBackward);
+    if(mv!==0&&window.SoundSystem)SoundSystem.footstep();
+    const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+    camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2-20*S,camera.position.x+fwd.x*mv*110*delta));
+    camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-15*S,camera.position.z+fwd.z*mv*110*delta));
+    camera.position.y=240*S;
+  }
+  checkExitDoor();checkClosetDoor();animateClosetDoors(delta);updateRotation();renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+// engine scripts loaded below
+</script>
+<script src="../floor1/sound-system.js"></script>
+<script src="../floor1/mystery-engine.js"></script>
+<script src="../floor1/mystery-state.js"></script>
+<script src="../floor1/mystery-ui.js"></script>
+<script src="../floor1/evidence-system.js"></script>
+<script>
+(async()=>{
+  await MysteryEngine.init();
+  let scenario=await MysteryState.load();
+  if(!scenario){scenario=MysteryEngine.generate();await MysteryState.save(scenario);}
+  window._scenario=scenario;
+  MysteryUI.init(scenario,false);
+  MysteryUI.setZone('roman_suite');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'romansuite' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

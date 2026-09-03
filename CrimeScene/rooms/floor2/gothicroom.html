@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Gothic Bedroom</title>
+<style>
+#exitFade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9999;transition:opacity 0.6s ease;}
+#exitFade.show{opacity:1;}
+#instructionLine{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:8px 16px;font-size:14px;color:#eee;background:rgba(0,0,0,0.6);border-radius:6px;z-index:30;pointer-events:none;white-space:nowrap;}
+body{margin:0;overflow:hidden;background:#000;font-family:Arial,sans-serif;}
+canvas{display:block;}
+#fadeOverlay{position:fixed;inset:0;background:#000;z-index:9999;animation:fadeOut 0.8s ease forwards;}
+@keyframes fadeOut{from{opacity:1;}to{opacity:0;}}
+#editHud{position:fixed;top:58px;left:50%;transform:translateX(-50%);z-index:60;display:flex;gap:8px;align-items:center;}
+#editBtn,#saveBtn,#loadBtn,#clearBtn{padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:rgba(0,0,0,0.72);color:#eee;cursor:pointer;user-select:none;}
+#editIndicator{padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(255,255,255,0.20);background:rgba(80,20,20,0.8);color:#ffd0d0;}
+#editIndicator.on{background:rgba(20,80,20,0.85);color:#d5ffd5;}
+#autoStatus{position:fixed;top:108px;left:50%;transform:translateX(-50%);padding:8px 12px;border-radius:10px;background:rgba(0,0,0,0.65);color:#d7f7d7;font:12px/1.35 system-ui,Arial;display:none;z-index:70;pointer-events:none;}
+#selInfo{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:8px 18px;background:rgba(0,0,0,0.8);color:#aaddff;border-radius:8px;font-size:13px;display:none;z-index:60;pointer-events:none;}
+#debugHud{position:fixed;left:10px;bottom:10px;color:#9ff;font:12px monospace;background:rgba(0,0,0,0.7);padding:8px;border-radius:6px;display:none;z-index:100;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="debugHud"></div>
+<div id="exitFade"></div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit &nbsp; M = Edit Mode</div>
+<div id="doorHint" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#e8c87a;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(200,160,60,0.4);">Press E — Return to Floor 1</div>
+<div id="wardrobeHint" style="position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#c8a820;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(200,160,60,0.4);">Press E — Open Wardrobe</div>
+<div id="chestHint" style="position:fixed;bottom:120px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#c8a820;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(200,160,60,0.4);">Press E — Open Chest</div>
+<div id="closetHint" style="position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#c8a820;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(200,160,60,0.4);">Press E — Enter Closet</div>
+<div id="fadeOverlay"></div>
+<div id="editHud">
+  <button id="editBtn" type="button">Edit Mode</button>
+  <button id="saveBtn" type="button">Save Layout</button>
+  <button id="loadBtn" type="button">Load Layout</button>
+  <button id="clearBtn" type="button">Clear Save</button>
+  <div id="editIndicator">OFF</div>
+</div>
+<div id="autoStatus"></div>
+<div id="selInfo"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+const STORAGE_KEY="gothic_room_layout";
+let scene,camera,renderer;
+let moveForward=false,moveBackward=false,turnLeft=false,turnRight=false;
+let yaw=0,prevTime=performance.now();
+const S=0.5;
+const RW=1600*S, RD=1600*S, RH=560*S;
+
+// ── Edit system ──
+let EDIT_MODE=false,selectedObject=null;
+const editableObjects=[];
+const raycaster=new THREE.Raycaster();
+const mouse=new THREE.Vector2();
+let _ec=0;
+function addGroup(g,id){
+  if(!g.userData)g.userData={};
+  g.userData.editId=id||("grp_"+(++_ec));
+  editableObjects.push(g); scene.add(g); return g;
+}
+function showStatus(msg,ok=true){
+  const el=document.getElementById("autoStatus");
+  el.style.display="block";el.style.color=ok?"#d7f7d7":"#ffd7d7";el.textContent=msg;
+  setTimeout(()=>{el.style.display="none";},2200);
+}
+function updateEditUI(){
+  const ind=document.getElementById("editIndicator");
+  ind.textContent=EDIT_MODE?"ON":"OFF";ind.classList.toggle("on",EDIT_MODE);
+  const btn=document.getElementById("editBtn");
+  btn.textContent=EDIT_MODE?"✏️ Edit Mode: ON":"Edit Mode: OFF";
+  btn.style.background=EDIT_MODE?"rgba(20,80,20,0.85)":"rgba(0,0,0,0.72)";
+  btn.style.color=EDIT_MODE?"#d5ffd5":"#eee";
+}
+function toggleEditMode(){EDIT_MODE=!EDIT_MODE;if(!EDIT_MODE){selectedObject=null;document.getElementById("selInfo").style.display="none";}updateEditUI();}
+function saveLayout(){
+  const objects=editableObjects.map(o=>{const wp=new THREE.Vector3();o.getWorldPosition(wp);const wq=new THREE.Quaternion();o.getWorldQuaternion(wq);return{id:o.userData.editId,position:{x:wp.x,y:wp.y,z:wp.z},quaternion:{x:wq.x,y:wq.y,z:wq.z,w:wq.w},scale:{x:o.scale.x,y:o.scale.y,z:o.scale.z}};});
+  localStorage.setItem(STORAGE_KEY,JSON.stringify({version:1,savedAt:Date.now(),objects}));
+  showStatus("✅ Layout saved",true);
+}
+function loadLayout(){
+  const json=localStorage.getItem(STORAGE_KEY);
+  if(!json){showStatus("No saved layout",false);return;}
+  try{const d=JSON.parse(json);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}showStatus("✅ Layout loaded",true);}catch(e){showStatus("Load failed",false);}
+}
+function clearSave(){localStorage.removeItem(STORAGE_KEY);showStatus("🗑 Save cleared",true);}
+
+function onMouseClick(e){
+  if(!EDIT_MODE)return;
+  const rect=renderer.domElement.getBoundingClientRect();
+  mouse.x=((e.clientX-rect.left)/rect.width)*2-1;
+  mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;
+  raycaster.setFromCamera(mouse,camera);
+  const meshes=[];
+  editableObjects.forEach(o=>{if(o.isMesh)meshes.push(o);else o.traverse(ch=>{if(ch.isMesh)meshes.push(ch);});});
+  const hits=raycaster.intersectObjects(meshes,false);
+  if(!hits.length){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}
+  let obj=hits[0].object;let cur=obj;while(cur){if(editableObjects.includes(cur)){obj=cur;break;}cur=cur.parent;}
+  if(!editableObjects.includes(obj)){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}
+  selectedObject=obj;
+  document.getElementById("selInfo").style.display="block";
+  document.getElementById("selInfo").textContent=`✏️ ${obj.userData.editId} | Arrows=Move  Shift+↑↓=Height  R=Rotate  Del=Delete`;
+  showStatus("Selected: "+obj.userData.editId,true);
+}
+
+function onKeyDown(e){
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code))e.preventDefault();
+  if(e.code==="KeyM"){toggleEditMode();return;}
+  if(e.code==="KeyG"){toggleDebug();return;}
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if(e.code==="KeyE"){
+    if(nearCloset&&!nearExit&&!closetTriggered){
+      closetTriggered=true;
+      document.getElementById("closetHint").style.display="none";
+      document.getElementById("exitFade").classList.add("show");
+      setTimeout(()=>window.location.href="closetroom.html?from=gothic",600);
+      return;
+    }
+    if(nearChest&&!nearWardrobe&&!nearExit){chestOpen=!chestOpen;return;}
+    if(nearWardrobe&&!nearExit){
+      wardrobeOpen=true;
+      if(!closetTriggered){
+        closetTriggered=true;
+        document.getElementById("exitFade").classList.add("show");
+        setTimeout(()=>window.location.href="closetroom.html?from=gothic",650);
+      }
+      return;
+    }
+    if(nearExit&&!exitTriggered){
+      exitTriggered=true;
+      document.getElementById("doorHint").style.display="none";
+      document.getElementById("exitFade").classList.add("show");
+      setTimeout(()=>window.location.href="floor2.html?from=gothic_room",600);
+    }
+    return;
+  }
+  if(EDIT_MODE&&selectedObject){
+    if(e.code==="Delete"||e.code==="Backspace"){e.preventDefault();scene.remove(selectedObject);const idx=editableObjects.indexOf(selectedObject);if(idx>-1)editableObjects.splice(idx,1);showStatus("🗑 Deleted: "+selectedObject.userData.editId,true);selectedObject=null;document.getElementById("selInfo").style.display="none";return;}
+    const speed=e.shiftKey?1:8;let moved=false;
+    if(!e.shiftKey){if(e.code==="ArrowUp"){selectedObject.position.z-=speed;moved=true;}if(e.code==="ArrowDown"){selectedObject.position.z+=speed;moved=true;}if(e.code==="ArrowLeft"){selectedObject.position.x-=speed;moved=true;}if(e.code==="ArrowRight"){selectedObject.position.x+=speed;moved=true;}}
+    if(e.shiftKey&&e.code==="ArrowUp"){selectedObject.position.y+=speed;moved=true;}if(e.shiftKey&&e.code==="ArrowDown"){selectedObject.position.y-=speed;moved=true;}
+    if(e.code==="KeyR"){selectedObject.rotation.y+=e.shiftKey?0.05:0.1;moved=true;}
+    if(moved)return;
+  }
+  if(!EDIT_MODE){
+    if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=true;
+    if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=true;
+    if(e.code==="ArrowLeft")turnLeft=true;
+    if(e.code==="ArrowRight")turnRight=true;
+  }
+}
+function onKeyUp(e){
+  if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=false;
+  if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=false;
+  if(e.code==="ArrowLeft")turnLeft=false;
+  if(e.code==="ArrowRight")turnRight=false;
+}
+
+// ── SVG Canvas Texture ──
+const _svgMatCache={};
+function makeSVGTexture(svgStr){
+  if(_svgMatCache[svgStr])return _svgMatCache[svgStr];
+  try{
+    const canvas=document.createElement('canvas');canvas.width=512;canvas.height=512;
+    const ctx=canvas.getContext('2d');
+    const blob=new Blob([svgStr],{type:'image/svg+xml'});
+    const url=URL.createObjectURL(blob);
+    const tex=new THREE.CanvasTexture(canvas);
+    const mat=new THREE.MeshLambertMaterial({map:tex,color:0xffffff,side:THREE.DoubleSide});
+    const img=new Image();
+    img.onload=()=>{ctx.drawImage(img,0,0,512,512);tex.needsUpdate=true;URL.revokeObjectURL(url);};
+    img.src=url;
+    _svgMatCache[svgStr]=mat;
+    return mat;
+  }catch(e){return new THREE.MeshLambertMaterial({color:0x2a1a0a,side:THREE.DoubleSide});}
+}
+
+const SVG_GOTHIC_WINDOW=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 220"><rect width="120" height="220" fill="#0a0a14"/><rect x="8" y="8" width="104" height="204" fill="#0e0e1a"/><rect x="18" y="100" width="84" height="104" fill="#1a2a4a" opacity="0.8"/><path d="M18 100 Q60 20 102 100" fill="#1a2a4a" opacity="0.9"/><line x1="60" y1="20" x2="60" y2="204" stroke="#2a2a3a" stroke-width="4"/><line x1="18" y1="120" x2="102" y2="120" stroke="#2a2a3a" stroke-width="3"/><line x1="18" y1="150" x2="102" y2="150" stroke="#2a2a3a" stroke-width="3"/><line x1="18" y1="180" x2="102" y2="180" stroke="#2a2a3a" stroke-width="3"/><ellipse cx="39" cy="80" rx="15" ry="15" fill="#4a3a1a" opacity="0.6"/><ellipse cx="81" cy="80" rx="15" ry="15" fill="#1a3a4a" opacity="0.6"/><rect x="2" y="2" width="116" height="216" fill="none" stroke="#3a3020" stroke-width="4"/></svg>`;
+
+const SVG_CREST=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 240"><rect width="200" height="240" fill="#1a1008"/><polygon points="100,10 190,60 190,180 100,230 10,180 10,60" fill="#2a1808" stroke="#c8a820" stroke-width="3"/><polygon points="100,30 170,70 170,170 100,210 30,170 30,70" fill="#1a1008"/><polygon points="100,50 90,90 55,90 82,112 72,150 100,128 128,150 118,112 145,90 110,90" fill="#c8a820" opacity="0.9"/><line x1="100" y1="10" x2="100" y2="230" stroke="#c8a820" stroke-width="1.5" opacity="0.3"/><line x1="10" y1="120" x2="190" y2="120" stroke="#c8a820" stroke-width="1.5" opacity="0.3"/></svg>`;
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById("fadeOverlay");if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x000000);
+  scene.fog=new THREE.Fog(0x000000,250,1200);
+  camera=new THREE.PerspectiveCamera(72,window.innerWidth/window.innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Lighting — gothic dark, point lights only
+  scene.add(new THREE.AmbientLight(0x080808,1.0));
+  const overhead=new THREE.PointLight(0xffcc77,2.0,1400);overhead.position.set(0,RH-40*S,0);scene.add(overhead);
+  const overhead2=new THREE.PointLight(0xffaa55,1.5,900);overhead2.position.set(-RW/4,RH-60*S,0);scene.add(overhead2);
+  const overhead3=new THREE.PointLight(0xffaa55,1.5,900);overhead3.position.set(RW/4,RH-60*S,0);scene.add(overhead3);
+  const fire=new THREE.PointLight(0xff7700,4.0,600);fire.position.set(0,60*S,-RD/2+60*S);scene.add(fire);
+  const fire2=new THREE.PointLight(0xff5500,2.5,350);fire2.position.set(0,40*S,-RD/2+40*S);scene.add(fire2);
+
+  buildRoom();
+  buildDebug();
+
+  // Auto-load saved layout
+  const _saved=localStorage.getItem(STORAGE_KEY);
+  if(_saved){try{const d=JSON.parse(_saved);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}}catch(err){}}
+
+  document.getElementById("editBtn").addEventListener("click",toggleEditMode);
+  document.getElementById("saveBtn").addEventListener("click",saveLayout);
+  document.getElementById("loadBtn").addEventListener("click",loadLayout);
+  document.getElementById("clearBtn").addEventListener("click",clearSave);
+  renderer.domElement.addEventListener("click",onMouseClick);
+  document.addEventListener("keydown",onKeyDown);
+  document.addEventListener("keyup",onKeyUp);
+  window.addEventListener("resize",onResize);
+
+  camera.position.set(0,240*S,RD/2-150*S);
+  if(new URLSearchParams(window.location.search).get("from")==="closet"){
+    camera.position.set(327,240*S,-1.7);yaw=Math.PI/2;
+  }
+  updateRotation();animate();
+}
+
+function buildRoom(){
+  // Materials
+  const stoneMat   =new THREE.MeshLambertMaterial({color:0x0a0a0a});
+  const stoneDark  =new THREE.MeshLambertMaterial({color:0x050505});
+  const stoneLight =new THREE.MeshLambertMaterial({color:0x111111});
+  const floorMat   =new THREE.MeshLambertMaterial({color:0x0a0a0a});
+  const ceilMat    =new THREE.MeshLambertMaterial({color:0x080808});
+  const darkWood   =new THREE.MeshLambertMaterial({color:0x080808});
+  const richWood   =new THREE.MeshLambertMaterial({color:0x101010});
+  const ironMat    =new THREE.MeshLambertMaterial({color:0x141414});
+  const goldMat    =new THREE.MeshLambertMaterial({color:0xb8900a});
+  const velvet     =new THREE.MeshLambertMaterial({color:0x080808});
+  const velvet2    =new THREE.MeshLambertMaterial({color:0x060606});
+  const marbleMat  =new THREE.MeshLambertMaterial({color:0x181818});
+  const emberMat   =new THREE.MeshLambertMaterial({color:0xff3300,emissive:0xaa1100,emissiveIntensity:1});
+  const candleMat  =new THREE.MeshLambertMaterial({color:0xe8e0c0});
+  const flameMat   =new THREE.MeshLambertMaterial({color:0xff8800,emissive:0xff4400,emissiveIntensity:1});
+
+  // ── Stone floor — large flagstones ──
+  const floor=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),stoneDark);
+  floor.rotation.x=-Math.PI/2;floor.position.y=0;scene.add(floor);
+  const tSz=80*S;
+  for(let ix=0;ix<Math.ceil(RW/tSz);ix++)for(let iz=0;iz<Math.ceil(RD/tSz);iz++){
+    const m=(ix+iz)%2===0?stoneMat:stoneDark;
+    const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-4,2*S,tSz-4),m);
+    t.position.set(-RW/2+tSz*(ix+0.5),1*S,-RD/2+tSz*(iz+0.5));scene.add(t);
+  }
+  const jMat=new THREE.MeshLambertMaterial({color:0x0a0908});
+  for(let ix=0;ix<=Math.ceil(RW/tSz);ix++){const j=new THREE.Mesh(new THREE.BoxGeometry(3*S,2.5*S,RD),jMat);j.position.set(-RW/2+tSz*ix,1.5*S,0);scene.add(j);}
+  for(let iz=0;iz<=Math.ceil(RD/tSz);iz++){const j=new THREE.Mesh(new THREE.BoxGeometry(RW,2.5*S,3*S),jMat);j.position.set(0,1.5*S,-RD/2+tSz*iz);scene.add(j);}
+
+  // ── Ceiling — vaulted with ribs ──
+  const ceil=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),ceilMat);
+  ceil.rotation.x=Math.PI/2;ceil.position.y=RH;scene.add(ceil);
+  // Gothic vault ribs
+  [-RW/3,0,RW/3].forEach(rx=>{
+    const rib=new THREE.Mesh(new THREE.BoxGeometry(10*S,RH,10*S),stoneDark);
+    rib.position.set(rx,RH/2,-RD/2+6*S);scene.add(rib);
+    const rib2=rib.clone();rib2.position.z=RD/2-6*S;scene.add(rib2);
+    const cross=new THREE.Mesh(new THREE.BoxGeometry(10*S,10*S,RD),stoneDark);
+    cross.position.set(rx,RH-5*S,0);scene.add(cross);
+  });
+  // Diagonal ribs for gothic cross-vault feel
+  [-1,1].forEach(s=>{
+    const diag=new THREE.Mesh(new THREE.BoxGeometry(8*S,8*S,RD*1.2),stoneDark);
+    diag.rotation.y=s*Math.PI/6;diag.position.set(s*RW/6,RH-5*S,0);scene.add(diag);
+  });
+
+  // ── Stone walls with block texture ──
+  const backWall=new THREE.Mesh(new THREE.BoxGeometry(RW,RH,18*S),stoneMat);
+  backWall.position.set(0,RH/2,-RD/2+9*S);scene.add(backWall);
+  for(let bx=0;bx<6;bx++)for(let by=0;by<5;by++){
+    const bk=new THREE.Mesh(new THREE.BoxGeometry(RW/6-5,RH/5-5,4*S),by%2===0?stoneLight:stoneMat);
+    bk.position.set(-RW/2+RW/6*(bx+0.5),RH/5*(by+0.5),-RD/2+20*S);scene.add(bk);
+  }
+  const leftWall=new THREE.Mesh(new THREE.BoxGeometry(18*S,RH,RD),stoneMat);
+  leftWall.position.set(-RW/2+9*S,RH/2,0);scene.add(leftWall);
+  const rightWall=leftWall.clone();rightWall.position.x=RW/2-9*S;scene.add(rightWall);
+  [-1,1].forEach(s=>{
+    for(let bz=0;bz<5;bz++)for(let by=0;by<5;by++){
+      const bk=new THREE.Mesh(new THREE.BoxGeometry(4*S,RH/5-5,RD/5-5),(bz+by)%2===0?stoneLight:stoneMat);
+      bk.position.set(s*(RW/2-20*S),RH/5*(by+0.5),-RD/2+RD/5*(bz+0.5));scene.add(bk);
+    }
+  });
+  // Front wall with arched doorway
+  const dGapW=240*S;
+  const fSideW=(RW-dGapW)/2;
+  const fL=new THREE.Mesh(new THREE.BoxGeometry(fSideW,RH,18*S),stoneMat);
+  fL.position.set(-(dGapW/2+fSideW/2),RH/2,RD/2-9*S);scene.add(fL);
+  const fR=fL.clone();fR.position.x=dGapW/2+fSideW/2;scene.add(fR);
+
+  // ── Gothic arched doorway ──
+  const dW=110*S,dH=340*S,dThick=18*S,doorZ=RD/2-8*S;
+  const archMat=stoneDark;
+  [-1,1].forEach(s=>{
+    const fs=new THREE.Mesh(new THREE.BoxGeometry(22*S,dH,dThick+4*S),archMat);
+    fs.position.set(s*(dW+11*S),dH/2,doorZ);scene.add(fs);
+  });
+  const archTop=new THREE.Mesh(new THREE.CylinderGeometry(dW,dW,dThick+4*S,16,1,false,0,Math.PI),archMat);
+  archTop.rotation.z=Math.PI/2;archTop.rotation.y=Math.PI/2;archTop.position.set(0,dH,doorZ);scene.add(archTop);
+  const aboveArch=new THREE.Mesh(new THREE.BoxGeometry(dW*2+44*S,RH-dH-dW,18*S),stoneMat);
+  aboveArch.position.set(0,dH+dW+(RH-dH-dW)/2,RD/2-9*S);scene.add(aboveArch);
+  // Door leaves
+  [-1,1].forEach(s=>{
+    const door=new THREE.Mesh(new THREE.BoxGeometry(dW-2,dH-2,12*S),darkWood);
+    door.position.set(s*dW/2,dH/2,doorZ);scene.add(door);
+    [0.2,0.5,0.8].forEach(py=>{
+      const pnl=new THREE.Mesh(new THREE.BoxGeometry(dW-20*S,dH*0.2,5*S),richWood);
+      pnl.position.set(s*dW/2,py*dH,doorZ+4*S);scene.add(pnl);
+    });
+    [0.15,0.45,0.75,0.9].forEach(py=>{
+      const band=new THREE.Mesh(new THREE.BoxGeometry(dW,6*S,14*S),ironMat);
+      band.position.set(s*dW/2,py*dH,doorZ);scene.add(band);
+    });
+    const hdl=new THREE.Mesh(new THREE.CylinderGeometry(3*S,3*S,24*S,8),ironMat);
+    hdl.rotation.z=Math.PI/2;hdl.position.set(s*(dW-18*S),dH*0.45,doorZ+7*S);scene.add(hdl);
+  });
+
+  // ── FIREPLACE — back wall centre ──
+  const fpGroup=new THREE.Group();
+  const fpW=340*S,fpH=300*S,fpD=80*S;
+  const ms=new THREE.Mesh(new THREE.BoxGeometry(28*S,fpH,fpD),marbleMat);ms.position.set(-fpW/2+14*S,fpH/2,0);fpGroup.add(ms);
+  const ms2=ms.clone();ms2.position.x=fpW/2-14*S;fpGroup.add(ms2);
+  const mt=new THREE.Mesh(new THREE.BoxGeometry(fpW+24*S,24*S,fpD+16*S),marbleMat);mt.position.set(0,fpH+12*S,0);fpGroup.add(mt);
+  const shelf=new THREE.Mesh(new THREE.BoxGeometry(fpW+60*S,18*S,fpD+36*S),marbleMat);shelf.position.set(0,fpH+28*S,12*S);fpGroup.add(shelf);
+  const firebox=new THREE.Mesh(new THREE.BoxGeometry(fpW-56*S,fpH-30*S,fpD-12*S),stoneDark);firebox.position.set(0,fpH/2-8*S,6*S);fpGroup.add(firebox);
+  const fireback=new THREE.Mesh(new THREE.BoxGeometry(fpW-58*S,fpH-32*S,6*S),ironMat);fireback.position.set(0,fpH/2-10*S,-fpD/2+20*S);fpGroup.add(fireback);
+  for(let i=0;i<7;i++){const b=new THREE.Mesh(new THREE.BoxGeometry(4*S,80*S,4*S),ironMat);b.position.set(-52*S+i*18*S,36*S,8*S);fpGroup.add(b);}
+  const gb=new THREE.Mesh(new THREE.BoxGeometry(fpW-58*S,8*S,24*S),ironMat);gb.position.set(0,8*S,6*S);fpGroup.add(gb);
+  for(let i=0;i<8;i++){const e=new THREE.Mesh(new THREE.BoxGeometry(10*S+i*3*S,7*S+i*6*S,8*S),emberMat);e.position.set(-40*S+i*12*S,10*S+i*3*S,7*S);fpGroup.add(e);}
+  // Gothic arch over fireplace
+  const fpArch=new THREE.Mesh(new THREE.CylinderGeometry((fpW-56*S)/2,(fpW-56*S)/2,12*S,16,1,false,0,Math.PI),stoneDark);
+  fpArch.rotation.z=Math.PI/2;fpArch.rotation.y=Math.PI/2;fpArch.position.set(0,fpH-14*S,6*S);fpGroup.add(fpArch);
+  fpGroup.position.set(0,0,-RD/2+fpD/2+9*S);
+  addGroup(fpGroup,"fireplace");
+
+  // ── Mantel: skull, candles, crest ──
+  const manG=new THREE.Group();
+  const shY=300*S+36*S;
+  const skull=new THREE.Mesh(new THREE.SphereGeometry(20*S,10,10),marbleMat);skull.scale.set(1,1.1,0.85);skull.position.set(0,shY+20*S,0);manG.add(skull);
+  [-1,1].forEach(s=>{const eye=new THREE.Mesh(new THREE.SphereGeometry(6*S,8,8),stoneDark);eye.position.set(s*8*S,shY+24*S,16*S);manG.add(eye);});
+  [-1,1].forEach(s=>{
+    [70*S,110*S,150*S].forEach((cx,ci)=>{
+      const c=new THREE.Mesh(new THREE.CylinderGeometry(4*S,4*S,22*S+ci*9*S,8),candleMat);c.position.set(s*cx,shY+11*S+ci*4*S,0);manG.add(c);
+      const fl=new THREE.Mesh(new THREE.SphereGeometry(4*S,6,6),flameMat);fl.position.set(s*cx,shY+24*S+ci*4*S+9*S,0);manG.add(fl);
+      const cl=new THREE.PointLight(0xff8800,0.4,120);cl.position.set(s*cx,shY+24*S+ci*4*S+9*S,0);manG.add(cl);
+    });
+  });
+  // Crest above fireplace
+  const crestFrame=new THREE.Mesh(new THREE.BoxGeometry(100*S+16*S,120*S+16*S,10*S),darkWood);crestFrame.position.set(0,shY+100*S,0);manG.add(crestFrame);
+  const crest=new THREE.Mesh(new THREE.PlaneGeometry(100*S,120*S),makeSVGTexture(SVG_CREST));crest.position.set(0,shY+100*S,6*S);manG.add(crest);
+  manG.position.set(0,0,-RD/2+fpD/2+9*S);
+  addGroup(manG,"mantel_decor");
+
+  // ── Wall torches ──
+  [[-RW/2+40*S,220*S,-RD/4],[RW/2-40*S,220*S,-RD/4],[-RW/2+40*S,220*S,RD/4],[RW/2-40*S,220*S,RD/4]].forEach(([tx,ty,tz],i)=>{
+    const tg=new THREE.Group();
+    const bracket=new THREE.Mesh(new THREE.BoxGeometry(32*S,8*S,32*S),ironMat);tg.add(bracket);
+    const pole=new THREE.Mesh(new THREE.CylinderGeometry(4*S,4*S,64*S,8),darkWood);pole.position.set(0,32*S,0);tg.add(pole);
+    const head=new THREE.Mesh(new THREE.CylinderGeometry(9*S,6*S,22*S,8),darkWood);head.position.set(0,70*S,0);tg.add(head);
+    const fl=new THREE.Mesh(new THREE.SphereGeometry(9*S,8,8),flameMat);fl.position.set(0,86*S,0);tg.add(fl);
+    const tl=new THREE.PointLight(0xff9900,2.0,400);tl.position.set(0,86*S,0);tg.add(tl);
+    tg.position.set(tx,ty,tz);
+    addGroup(tg,"torch_"+(i+1));
+  });
+
+  // ── Gothic windows — stained glass effect ──
+  [[-1,1]].forEach(()=>{
+    [-RD/4,RD/4].forEach((wz,wi)=>{
+      const wg=new THREE.Group();
+      const wFrame=new THREE.Mesh(new THREE.BoxGeometry(70*S+16*S,180*S+30*S,22*S),stoneDark);wg.add(wFrame);
+      const wGlass=new THREE.Mesh(new THREE.PlaneGeometry(70*S,180*S),makeSVGTexture(SVG_GOTHIC_WINDOW));wGlass.position.z=8*S;wg.add(wGlass);
+      // Pointed arch top
+      const wArch=new THREE.Mesh(new THREE.CylinderGeometry(35*S,35*S,22*S,12,1,false,0,Math.PI),stoneDark);
+      wArch.rotation.z=Math.PI/2;wArch.rotation.y=Math.PI/2;wArch.position.set(0,90*S+15*S,0);wg.add(wArch);
+      wg.position.set(-RW/2+12*S,280*S,wz);wg.rotation.y=Math.PI/2;
+      addGroup(wg,"window_L_"+(wi+1));
+
+      const wg2=wg.clone();wg2.position.set(RW/2-12*S,280*S,wz);wg2.rotation.y=-Math.PI/2;
+      // rebuild userData so it's a separate editable
+      wg2.userData={editId:"window_R_"+(wi+1)};
+      editableObjects.push(wg2);scene.add(wg2);
+    });
+  });
+
+  // ── THRONE CHAIR — back wall left ──
+  const throneG=new THREE.Group();
+  const tSeat=new THREE.Mesh(new THREE.BoxGeometry(160*S,16*S,140*S),darkWood);tSeat.position.set(0,90*S,0);throneG.add(tSeat);
+  const tBase=new THREE.Mesh(new THREE.BoxGeometry(170*S,90*S,150*S),richWood);tBase.position.set(0,45*S,0);throneG.add(tBase);
+  const tBack=new THREE.Mesh(new THREE.BoxGeometry(160*S,280*S,16*S),darkWood);tBack.position.set(0,230*S,-62*S);throneG.add(tBack);
+  // Carved panels on back
+  [-1,0,1].forEach(px=>{
+    const pnl=new THREE.Mesh(new THREE.BoxGeometry(44*S,180*S,6*S),richWood);pnl.position.set(px*50*S,240*S,-54*S);throneG.add(pnl);
+    const arch=new THREE.Mesh(new THREE.CylinderGeometry(22*S,22*S,8*S,10,1,false,0,Math.PI),richWood);
+    arch.rotation.z=Math.PI/2;arch.rotation.y=Math.PI/2;arch.position.set(px*50*S,330*S,-54*S);throneG.add(arch);
+  });
+  // Seat cushion
+  const cush=new THREE.Mesh(new THREE.BoxGeometry(150*S,14*S,130*S),velvet);cush.position.set(0,100*S,5*S);throneG.add(cush);
+  // Arms
+  [-1,1].forEach(s=>{
+    const arm=new THREE.Mesh(new THREE.BoxGeometry(20*S,20*S,140*S),darkWood);arm.position.set(s*70*S,110*S,5*S);throneG.add(arm);
+    const armPost=new THREE.Mesh(new THREE.CylinderGeometry(10*S,10*S,100*S,8),darkWood);armPost.position.set(s*70*S,60*S,60*S);throneG.add(armPost);
+    const armPost2=armPost.clone();armPost2.position.set(s*70*S,60*S,-50*S);throneG.add(armPost2);
+  });
+  // Spire finials
+  [-1,1].forEach(s=>{
+    const fin=new THREE.Mesh(new THREE.ConeGeometry(12*S,50*S,8),richWood);fin.position.set(s*68*S,395*S,-62*S);throneG.add(fin);
+    const finBase=new THREE.Mesh(new THREE.CylinderGeometry(14*S,14*S,14*S,8),darkWood);finBase.position.set(s*68*S,372*S,-62*S);throneG.add(finBase);
+    const goldRing=new THREE.Mesh(new THREE.CylinderGeometry(16*S,16*S,4*S,10),goldMat);goldRing.position.set(s*68*S,367*S,-62*S);throneG.add(goldRing);
+  });
+  const topFin=new THREE.Mesh(new THREE.ConeGeometry(14*S,60*S,8),richWood);topFin.position.set(0,400*S,-62*S);throneG.add(topFin);
+  throneG.position.set(-RW/2+160*S,0,-RD/2+180*S);
+  addGroup(throneG,"throne");
+
+  // ── GOTHIC FOUR-POSTER BED ──
+  const bedG=new THREE.Group();
+  const bW=380*S,bL=520*S,bH=90*S;
+  // Platform
+  const platform=new THREE.Mesh(new THREE.BoxGeometry(bW+20*S,bH,bL+20*S),darkWood);platform.position.set(0,bH/2,0);bedG.add(platform);
+  [-1,1].forEach(s=>{
+    const panel=new THREE.Mesh(new THREE.BoxGeometry(bW+22*S,bH*0.6,10*S),richWood);panel.position.set(0,bH*0.4,s*(bL/2+4*S));bedG.add(panel);
+    const side=new THREE.Mesh(new THREE.BoxGeometry(10*S,bH*0.6,bL+22*S),richWood);side.position.set(s*(bW/2+4*S),bH*0.4,0);bedG.add(side);
+  });
+  // Mattress
+  const mattress=new THREE.Mesh(new THREE.BoxGeometry(bW-10*S,28*S,bL-10*S),new THREE.MeshLambertMaterial({color:0xe0d8c0}));mattress.position.set(0,bH+14*S,0);bedG.add(mattress);
+  // Coverlet — deep crimson
+  const coverlet=new THREE.Mesh(new THREE.BoxGeometry(bW-12*S,18*S,bL*0.7),velvet);coverlet.position.set(0,bH+28*S,bL*0.08);bedG.add(coverlet);
+  const ctrim=new THREE.Mesh(new THREE.BoxGeometry(bW-12*S,4*S,8*S),goldMat);ctrim.position.set(0,bH+38*S,bL*0.08+bL*0.7/2-4*S);bedG.add(ctrim);
+  // Pillows
+  [-1,0,1].forEach(px=>{const p=new THREE.Mesh(new THREE.BoxGeometry(110*S,20*S,70*S),new THREE.MeshLambertMaterial({color:0xd8d0b8}));p.position.set(px*115*S,bH+32*S,-bL/2+48*S);bedG.add(p);});
+  // Four gothic posts
+  const postH=RH*0.85;
+  [[-bW/2,-bL/2],[bW/2,-bL/2],[-bW/2,bL/2],[bW/2,bL/2]].forEach(([px,pz])=>{
+    const post=new THREE.Mesh(new THREE.CylinderGeometry(14*S,16*S,postH,8),darkWood);post.position.set(px,postH/2,pz);bedG.add(post);
+    [0.15,0.35,0.55,0.75].forEach(h=>{const ring=new THREE.Mesh(new THREE.CylinderGeometry(18*S,18*S,12*S,8),richWood);ring.position.set(px,postH*h,pz);bedG.add(ring);});
+    const fin=new THREE.Mesh(new THREE.ConeGeometry(14*S,55*S,8),richWood);fin.position.set(px,postH+27*S,pz);bedG.add(fin);
+    const finBase=new THREE.Mesh(new THREE.CylinderGeometry(17*S,17*S,14*S,8),darkWood);finBase.position.set(px,postH+7*S,pz);bedG.add(finBase);
+    const gRing=new THREE.Mesh(new THREE.CylinderGeometry(20*S,20*S,4*S,10),goldMat);gRing.position.set(px,postH+15*S,pz);bedG.add(gRing);
+  });
+  // Headboard — gothic arched
+  const hb=new THREE.Mesh(new THREE.BoxGeometry(bW+10*S,260*S,18*S),darkWood);hb.position.set(0,bH+130*S,-bL/2-4*S);bedG.add(hb);
+  [-1,0,1].forEach(px=>{
+    const arch=new THREE.Mesh(new THREE.BoxGeometry(95*S,160*S,6*S),richWood);arch.position.set(px*105*S,bH+110*S,-bL/2+5*S);bedG.add(arch);
+    const archTop=new THREE.Mesh(new THREE.CylinderGeometry(47*S,47*S,8*S,12,1,false,0,Math.PI),richWood);archTop.rotation.z=Math.PI/2;archTop.rotation.y=Math.PI/2;archTop.position.set(px*105*S,bH+190*S,-bL/2+5*S);bedG.add(archTop);
+  });
+  const hbPanel=new THREE.Mesh(new THREE.BoxGeometry(bW-10*S,210*S,8*S),velvet2);hbPanel.position.set(0,bH+115*S,-bL/2+7*S);bedG.add(hbPanel);
+  // Canopy frame + drapes
+  const canopy=new THREE.Mesh(new THREE.BoxGeometry(bW+30*S,14*S,bL+30*S),darkWood);canopy.position.set(0,postH+14*S,0);bedG.add(canopy);
+  const drapeMat=new THREE.MeshLambertMaterial({color:0x080808,transparent:true,opacity:0.75,side:THREE.DoubleSide});
+  [[-bW/2,0],[bW/2,0],[0,-bL/2],[0,bL/2]].forEach(([dx,dz],i)=>{
+    const drape=new THREE.Mesh(new THREE.PlaneGeometry(i<2?bL:bW,postH),drapeMat);drape.rotation.y=i<2?Math.PI/2:0;drape.position.set(dx,postH/2,dz);bedG.add(drape);
+  });
+  bedG.position.set(0,0,-RD/2+bL/2+40*S);
+  addGroup(bedG,"gothic_bed");
+
+  // ── WARDROBE DOOR FRAME — right wall (doors open to closet) ──
+  const wdG=new THREE.Group();
+  const wdW=280*S,wdH=420*S,wdD=12*S;
+  // Frame only — no body
+  [-1,1].forEach(s=>{
+    const side=new THREE.Mesh(new THREE.BoxGeometry(16*S,wdH,wdD),darkWood);side.position.set(s*wdW/2,wdH/2,0);wdG.add(side);
+  });
+  const top=new THREE.Mesh(new THREE.BoxGeometry(wdW+32*S,20*S,wdD),darkWood);top.position.set(0,wdH+10*S,0);wdG.add(top);
+  const crown=new THREE.Mesh(new THREE.BoxGeometry(wdW+44*S,16*S,wdD+8*S),richWood);crown.position.set(0,wdH+24*S,0);wdG.add(crown);
+  [-1,0,1].forEach(s=>{const sp=new THREE.Mesh(new THREE.ConeGeometry(10*S,40*S,8),richWood);sp.position.set(s*100*S,wdH+46*S,0);wdG.add(sp);});
+  // Door panels
+  const wdDoors=[];
+  [-1,1].forEach(s=>{
+    const pivot=new THREE.Group();
+    pivot.position.set(s*wdW/2,0,wdD/2);
+    const door=new THREE.Mesh(new THREE.BoxGeometry(wdW/2-4*S,wdH-10*S,8*S),richWood);
+    door.position.set(-s*(wdW/4-2*S),wdH/2,0);pivot.add(door);
+    [0.2,0.55,0.82].forEach(h=>{
+      const pnl=new THREE.Mesh(new THREE.BoxGeometry(wdW/2-24*S,wdH*0.22,4*S),darkWood);
+      pnl.position.set(-s*(wdW/4-2*S),h*wdH,3*S);pivot.add(pnl);
+    });
+    const hdl=new THREE.Mesh(new THREE.SphereGeometry(5*S,8,8),goldMat);
+    hdl.position.set(-s*(wdW/2-24*S),wdH*0.45,5*S);pivot.add(hdl);
+    wdG.add(pivot);
+    wdDoors.push({pivot,s});
+  });
+  wdG.userData.doors=wdDoors;
+  wdG.userData.open=false;
+  wdG.position.set(RW/2-8*S,0,RD/4);wdG.rotation.y=Math.PI/2;
+  addGroup(wdG,"wardrobe");
+  // Dark backing — fills entire opening behind doors
+  const wdBacking=new THREE.Mesh(new THREE.BoxGeometry(wdW+10*S,wdH+10*S,8*S),new THREE.MeshLambertMaterial({color:0x020202}));
+  wdBacking.position.set(RW/2-4*S,wdH/2,RD/4);
+  wdBacking.rotation.y=Math.PI/2;
+  scene.add(wdBacking);
+  // Centre strip to close the gap between doors
+  const wdStrip=new THREE.Mesh(new THREE.BoxGeometry(10*S,wdH,14*S),darkWood);
+  wdStrip.position.set(RW/2-8*S,wdH/2,RD/4);
+  wdStrip.rotation.y=Math.PI/2;
+  scene.add(wdStrip);
+
+  // ── DRESSING TABLE — right wall ──
+  const dtG=new THREE.Group();
+  const dtTop=new THREE.Mesh(new THREE.BoxGeometry(180*S,12*S,80*S),richWood);dtTop.position.set(0,88*S,0);dtG.add(dtTop);
+  const dtFront=new THREE.Mesh(new THREE.BoxGeometry(180*S,76*S,12*S),darkWood);dtFront.position.set(0,44*S,34*S);dtG.add(dtFront);
+  [-1,1].forEach(s=>{const side=new THREE.Mesh(new THREE.BoxGeometry(12*S,76*S,80*S),darkWood);side.position.set(s*84*S,44*S,0);dtG.add(side);});
+  // Drawers
+  [-1,1].forEach(s=>{[0.25,0.6].forEach(h=>{const drw=new THREE.Mesh(new THREE.BoxGeometry(72*S,22*S,10*S),richWood);drw.position.set(s*42*S,h*76*S,35*S);dtG.add(drw);const knob=new THREE.Mesh(new THREE.SphereGeometry(4*S,8,8),goldMat);knob.position.set(s*42*S,h*76*S,41*S);dtG.add(knob);});});
+  [[-70*S,30*S],[70*S,30*S],[-70*S,-30*S],[70*S,-30*S]].forEach(([lx,lz])=>{const leg=new THREE.Mesh(new THREE.CylinderGeometry(5*S,5*S,82*S,8),darkWood);leg.position.set(lx,41*S,lz);dtG.add(leg);});
+  // Mirror
+  const mirrorFrame=new THREE.Mesh(new THREE.BoxGeometry(140*S+16*S,160*S+16*S,10*S),darkWood);mirrorFrame.position.set(0,200*S,0);dtG.add(mirrorFrame);
+  const mirror=new THREE.Mesh(new THREE.PlaneGeometry(140*S,160*S),new THREE.MeshLambertMaterial({color:0x8899aa,emissive:0x112233,emissiveIntensity:0.2}));mirror.position.set(0,200*S,6*S);dtG.add(mirror);
+  const mArch=new THREE.Mesh(new THREE.CylinderGeometry(70*S,70*S,12*S,14,1,false,0,Math.PI),darkWood);mArch.rotation.z=Math.PI/2;mArch.rotation.y=Math.PI/2;mArch.position.set(0,288*S,0);dtG.add(mArch);
+  const mFin=new THREE.Mesh(new THREE.ConeGeometry(12*S,40*S,8),richWood);mFin.position.set(0,320*S,0);dtG.add(mFin);
+  // Candle on table
+  const dc=new THREE.Mesh(new THREE.CylinderGeometry(4*S,4*S,22*S,8),candleMat);dc.position.set(50*S,100*S,0);dtG.add(dc);
+  const df=new THREE.Mesh(new THREE.SphereGeometry(4*S,6,6),flameMat);df.position.set(50*S,112*S,0);dtG.add(df);
+  const dl=new THREE.PointLight(0xff8800,0.4,120);dl.position.set(50*S,112*S,0);dtG.add(dl);
+  dtG.position.set(RW/2-50*S,0,-RD/4);dtG.rotation.y=Math.PI/2;
+  addGroup(dtG,"dressing_table");
+
+  // ── CHEST — foot of bed ──
+  const chestG=new THREE.Group();
+  const cBody=new THREE.Mesh(new THREE.BoxGeometry(220*S,80*S,100*S),darkWood);cBody.position.set(0,40*S,0);chestG.add(cBody);
+  const lidPivot=new THREE.Group();lidPivot.position.set(0,80*S,-50*S);lidPivot.userData.isChestLidPivot=true;
+  const cLid=new THREE.Mesh(new THREE.BoxGeometry(220*S,30*S,100*S),darkWood);cLid.position.set(0,15*S,50*S);lidPivot.add(cLid);
+  const cLidTop=new THREE.Mesh(new THREE.CylinderGeometry(50*S,50*S,220*S,16,1,false,0,Math.PI),richWood);cLidTop.rotation.z=Math.PI/2;cLidTop.position.set(0,30*S,50*S);lidPivot.add(cLidTop);
+  chestG.add(lidPivot);chestG.userData.lidPivot=lidPivot;
+  [-80*S,0,80*S].forEach(bx=>{const strap=new THREE.Mesh(new THREE.BoxGeometry(8*S,116*S,102*S),ironMat);strap.position.set(bx,56*S,0);chestG.add(strap);});
+  const lock=new THREE.Mesh(new THREE.BoxGeometry(22*S,22*S,8*S),goldMat);lock.position.set(0,76*S,51*S);chestG.add(lock);
+  chestG.position.set(0,0,-RD/2+bL+80*S);
+  addGroup(chestG,"chest");
+
+  // ── Bookcase — right wall ──
+  const bcG=new THREE.Group();
+  const bcW=240*S,bcH=380*S,bcD=60*S;
+  const bcBack=new THREE.Mesh(new THREE.BoxGeometry(bcW,bcH,8*S),darkWood);bcBack.position.set(0,bcH/2,-bcD/2+4*S);bcG.add(bcBack);
+  [-1,1].forEach(s=>{const side=new THREE.Mesh(new THREE.BoxGeometry(12*S,bcH,bcD),darkWood);side.position.set(s*(bcW/2-6*S),bcH/2,0);bcG.add(side);});
+  [0,0.25,0.5,0.75,1.0].forEach(h=>{const shelf=new THREE.Mesh(new THREE.BoxGeometry(bcW,10*S,bcD),richWood);shelf.position.set(0,h*bcH+5*S,0);bcG.add(shelf);});
+  // Books
+  const bookColors=[0x2a0a0a,0x0a2a0a,0x0a0a2a,0x1a1008,0x1a081a,0x081a1a,0x181808];
+  let bx=-bcW/2+18*S;
+  for(let row=0;row<4;row++){
+    bx=-bcW/2+18*S;
+    while(bx<bcW/2-18*S){
+      const bw=(14+Math.random()*12)*S;
+      const bh=(80+Math.random()*40)*S;
+      const book=new THREE.Mesh(new THREE.BoxGeometry(bw,bh,bcD-16*S),new THREE.MeshLambertMaterial({color:bookColors[Math.floor(Math.random()*bookColors.length)]}));
+      book.position.set(bx+bw/2,row*bcH/4+bcH/8+bh/2,-2*S);bcG.add(book);
+      bx+=bw+2*S;
+    }
+  }
+  bcG.position.set(RW/2-bcD/2-8*S,0,-RD/4);bcG.rotation.y=Math.PI/2;
+  addGroup(bcG,"bookcase");
+
+  // ── Iron chandelier ──
+  const chanG=new THREE.Group();
+  const chanRing=new THREE.Mesh(new THREE.TorusGeometry(80*S,5*S,8,24),ironMat);chanRing.rotation.x=Math.PI/2;chanG.add(chanRing);
+  const chanStem=new THREE.Mesh(new THREE.CylinderGeometry(4*S,4*S,80*S,8),ironMat);chanStem.position.set(0,40*S,0);chanG.add(chanStem);
+  const chanCap=new THREE.Mesh(new THREE.CylinderGeometry(20*S,10*S,20*S,8),ironMat);chanCap.position.set(0,80*S,0);chanG.add(chanCap);
+  for(let i=0;i<8;i++){
+    const angle=i/8*Math.PI*2;
+    const arm=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,80*S,6),ironMat);arm.rotation.z=Math.PI/2;arm.position.set(Math.cos(angle)*40*S,-2*S,Math.sin(angle)*40*S);arm.rotation.y=-angle;chanG.add(arm);
+    const cup=new THREE.Mesh(new THREE.CylinderGeometry(5*S,3*S,10*S,8),goldMat);cup.position.set(Math.cos(angle)*80*S,-8*S,Math.sin(angle)*80*S);chanG.add(cup);
+    const can=new THREE.Mesh(new THREE.CylinderGeometry(3*S,3*S,22*S,8),candleMat);can.position.set(Math.cos(angle)*80*S,2*S,Math.sin(angle)*80*S);chanG.add(can);
+    const fl=new THREE.Mesh(new THREE.SphereGeometry(4*S,6,6),flameMat);fl.position.set(Math.cos(angle)*80*S,14*S,Math.sin(angle)*80*S);chanG.add(fl);
+    const cl=new THREE.PointLight(0xff8800,0.35,150);cl.position.set(Math.cos(angle)*80*S,14*S,Math.sin(angle)*80*S);chanG.add(cl);
+  }
+  chanG.position.set(0,RH-90*S,0);
+  addGroup(chanG,"chandelier");
+
+  // ── Tapestry — left wall ──
+  const tapG=new THREE.Group();
+  const tapFrame=new THREE.Mesh(new THREE.BoxGeometry(200*S+16*S,300*S+16*S,10*S),darkWood);tapG.add(tapFrame);
+  const tap=new THREE.Mesh(new THREE.PlaneGeometry(200*S,300*S),makeSVGTexture(SVG_CREST));tap.position.z=6*S;tapG.add(tap);
+  tapG.position.set(-RW/2+12*S,280*S,0);tapG.rotation.y=Math.PI/2;
+  addGroup(tapG,"tapestry");
+
+  // ── Armour stand — left of fireplace ──
+  const armG=new THREE.Group();
+  const abody=new THREE.Mesh(new THREE.CylinderGeometry(28*S,22*S,90*S,10),ironMat);abody.position.set(0,50*S,0);armG.add(abody);
+  const ahead=new THREE.Mesh(new THREE.SphereGeometry(26*S,10,10),ironMat);ahead.scale.set(1,1.1,1);ahead.position.set(0,108*S,0);armG.add(ahead);
+  const avisor=new THREE.Mesh(new THREE.BoxGeometry(28*S,8*S,6*S),stoneDark);avisor.position.set(0,108*S,22*S);armG.add(avisor);
+  [-1,1].forEach(s=>{
+    const sh=new THREE.Mesh(new THREE.SphereGeometry(20*S,8,8),ironMat);sh.position.set(s*38*S,88*S,0);armG.add(sh);
+    const arm=new THREE.Mesh(new THREE.CylinderGeometry(10*S,8*S,60*S,8),ironMat);arm.rotation.z=s*Math.PI/5;arm.position.set(s*52*S,62*S,0);armG.add(arm);
+  });
+  [50*S,90*S].forEach(h=>{const tr=new THREE.Mesh(new THREE.CylinderGeometry(29*S,29*S,4*S,10),goldMat);tr.position.set(0,h,0);armG.add(tr);});
+  const astand=new THREE.Mesh(new THREE.CylinderGeometry(6*S,10*S,14*S,8),darkWood);astand.position.set(0,7*S,0);armG.add(astand);
+  const abase=new THREE.Mesh(new THREE.CylinderGeometry(22*S,22*S,8*S,12),darkWood);abase.position.set(0,4*S,0);armG.add(abase);
+  armG.position.set(-160*S,0,-RD/2+120*S);
+  addGroup(armG,"armour_stand");
+
+  // ── Stone pillar pair ──
+  [-1,1].forEach((s,i)=>{
+    const pg=new THREE.Group();
+    const pBase=new THREE.Mesh(new THREE.BoxGeometry(50*S,20*S,50*S),stoneLight);pBase.position.set(0,10*S,0);pg.add(pBase);
+    const pShaft=new THREE.Mesh(new THREE.CylinderGeometry(20*S,22*S,RH-60*S,12),stoneMat);pShaft.position.set(0,(RH-60*S)/2+20*S,0);pg.add(pShaft);
+    [RH*0.2,RH*0.4,RH*0.6,RH*0.8].forEach(h=>{const ring=new THREE.Mesh(new THREE.CylinderGeometry(23*S,23*S,8*S,12),stoneLight);ring.position.set(0,h,0);pg.add(ring);});
+    const pCap=new THREE.Mesh(new THREE.BoxGeometry(55*S,22*S,55*S),stoneLight);pCap.position.set(0,RH-22*S,0);pg.add(pCap);
+    pg.position.set(s*RW/4,0,RD/4);
+    addGroup(pg,"pillar_"+(i+1));
+  });
+
+  // ── Dark rug ──
+  const rugG=new THREE.Group();
+  const rugBorder=new THREE.Mesh(new THREE.BoxGeometry(400*S,2*S,240*S),new THREE.MeshLambertMaterial({color:0x060606}));rugBorder.position.y=1*S;rugG.add(rugBorder);
+  const rug=new THREE.Mesh(new THREE.BoxGeometry(385*S,3*S,225*S),velvet2);rug.position.y=2*S;rugG.add(rug);
+  rugG.position.set(80*S,0,0);
+  addGroup(rugG,"rug");
+}
+
+function onResize(){camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);}
+function updateRotation(){camera.rotation.order="YXZ";camera.rotation.set(0,yaw,0);}
+
+const exitCooldown=(new URLSearchParams(window.location.search).get("from")==="floor1")?Date.now()+4000:0;
+let exitTriggered=false,nearExit=false;
+let nearWardrobe=false,wardrobeOpen=false,wardrobeGroup=null;
+let nearChest=false,chestOpen=false,chestGroup=null;
+let nearCloset=false,closetTriggered=false;
+
+function checkExitDoor(){
+  if(exitTriggered)return;if(Date.now()<exitCooldown)return;
+  nearExit=camera.position.x>-200*S&&camera.position.x<200*S&&camera.position.z>RD/2-200*S;
+  document.getElementById("doorHint").style.display=nearExit?"block":"none";
+}
+
+function checkChest(){
+  if(!chestGroup){chestGroup=editableObjects.find(o=>o.userData.editId==="chest");}
+  if(!chestGroup)return;
+  const wp=new THREE.Vector3();chestGroup.getWorldPosition(wp);
+  const dx=camera.position.x-wp.x, dz=camera.position.z-wp.z;
+  nearChest=Math.sqrt(dx*dx+dz*dz)<180*S;
+  const hint=document.getElementById("chestHint");
+  if(nearChest&&!nearWardrobe&&!nearExit){
+    hint.textContent=chestOpen?"Press E — Close Chest":"Press E — Open Chest";
+    hint.style.display="block";
+  }else{hint.style.display="none";}
+}
+
+function animateChest(delta){
+  if(!chestGroup)return;
+  const pivot=chestGroup.userData.lidPivot;
+  if(!pivot)return;
+  const target=chestOpen?-Math.PI*0.75:0;
+  pivot.rotation.x+=(target-pivot.rotation.x)*Math.min(1,delta*6);
+}
+
+function checkCloset(){
+  // Trigger zone just inside the wall opening (X near RW/2, Z near wardrobe)
+  const px=camera.position.x, pz=camera.position.z;
+  nearCloset=wardrobeOpen&&px>RW/2-80*S&&Math.abs(pz-10)<80*S&&!closetTriggered;
+  document.getElementById("closetHint").style.display=(nearCloset&&!nearExit)?"block":"none";
+  if(nearCloset&&!nearExit) document.getElementById("wardrobeHint").style.display="none";
+}
+
+function checkWardrobe(){
+  if(!wardrobeGroup){wardrobeGroup=editableObjects.find(o=>o.userData.editId==="wardrobe");}
+  if(!wardrobeGroup)return;
+  const dx=camera.position.x-301, dz=camera.position.z-10;
+  nearWardrobe=Math.sqrt(dx*dx+dz*dz)<180*S;
+  const hint=document.getElementById("wardrobeHint");
+  if(nearWardrobe&&!nearExit){
+    hint.textContent="Press E — Enter Closet";
+    hint.style.display="block";
+  }else{hint.style.display="none";}
+}
+
+function animateWardrobe(delta){
+  if(!wardrobeGroup||!wardrobeGroup.userData.doors)return;
+  const target=wardrobeOpen?Math.PI*0.75:0;
+  wardrobeGroup.userData.doors.forEach(({pivot,s})=>{
+    pivot.rotation.y+=(s*target-pivot.rotation.y)*Math.min(1,delta*6);
+  });
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();const delta=(now-prevTime)/1000;prevTime=now;
+  if(!EDIT_MODE){
+    if(turnLeft)yaw+=2.2*delta;if(turnRight)yaw-=2.2*delta;
+    const mv=Number(moveForward)-Number(moveBackward);
+    if(mv!==0&&window.SoundSystem)SoundSystem.footstep();
+    const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+    camera.position.x+=fwd.x*mv*110*delta;
+    camera.position.z+=fwd.z*mv*110*delta;
+    camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2+200*S-20*S,camera.position.x));
+    camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-15*S,camera.position.z));
+    camera.position.y=240*S;
+  }
+  checkExitDoor();checkChest();checkCloset();checkWardrobe();animateChest(delta);animateWardrobe(delta);updateRotation();renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+let DEBUG_ON=false,debugGroup=null,positionDisplayInterval=null;
+function buildDebug(){
+  debugGroup=new THREE.Group();debugGroup.visible=false;scene.add(debugGroup);
+  const mainGrid=new THREE.GridHelper(4000,80,0x4488ff,0x222244);mainGrid.position.y=5;debugGroup.add(mainGrid);
+  const fineGrid=new THREE.GridHelper(4000,400,0x335577,0x1a1a22);fineGrid.position.y=3;debugGroup.add(fineGrid);
+  const axes=new THREE.AxesHelper(400);axes.position.y=10;debugGroup.add(axes);
+}
+function toggleDebug(){
+  DEBUG_ON=!DEBUG_ON;
+  if(debugGroup)debugGroup.visible=DEBUG_ON;
+  const hud=document.getElementById("debugHud");if(hud)hud.style.display=DEBUG_ON?"block":"none";
+  if(DEBUG_ON)startPositionDisplay();else stopPositionDisplay();
+}
+function startPositionDisplay(){
+  stopPositionDisplay();
+  positionDisplayInterval=setInterval(()=>{
+    if(!camera||!DEBUG_ON)return;
+    const p=camera.position,yd=((yaw||0)*(180/Math.PI)).toFixed(1);
+    document.getElementById("debugHud").innerHTML=`X: ${p.x.toFixed(1)}<br>Y: ${p.y.toFixed(1)}<br>Z: ${p.z.toFixed(1)}<br>Yaw: ${yd}°`;
+  },100);
+}
+function stopPositionDisplay(){clearInterval(positionDisplayInterval);}
+init();</script>
+<script src="../floor1/sound-system.js"></script>
+<script src="../floor1/mystery-engine.js"></script>
+<script src="../floor1/mystery-state.js"></script>
+<script src="../floor1/mystery-ui.js"></script>
+<script src="../floor1/evidence-system.js"></script>
+<script>
+(async()=>{
+  await MysteryEngine.init();
+  let scenario=await MysteryState.load();
+  if(!scenario){scenario=MysteryEngine.generate();await MysteryState.save(scenario);}
+  window._scenario=scenario;
+  MysteryUI.init(scenario,false);
+  MysteryUI.setZone('gothic_bedroom');
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'gothicroom' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

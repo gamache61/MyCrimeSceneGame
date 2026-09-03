@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>The Midnight Room</title>
+<style>
+#exitFade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9999;transition:opacity 0.6s ease;}
+#exitFade.show{opacity:1;}
+#instructionLine{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:8px 16px;font-size:14px;color:#eee;background:rgba(0,0,0,0.6);border-radius:6px;z-index:30;pointer-events:none;white-space:nowrap;}
+body{margin:0;overflow:hidden;background:#000;font-family:Arial,sans-serif;}
+canvas{display:block;}
+#fadeOverlay{position:fixed;inset:0;background:#000;z-index:9999;animation:fadeOut 0.8s ease forwards;}
+@keyframes fadeOut{from{opacity:1;}to{opacity:0;}}
+#editHud{position:fixed;top:58px;left:50%;transform:translateX(-50%);z-index:60;display:flex;gap:8px;align-items:center;font-family:system-ui,Arial,sans-serif;}
+#editBtn,#saveBtn,#loadBtn,#clearBtn{padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:rgba(0,0,0,0.72);color:#eee;cursor:pointer;user-select:none;}
+#editIndicator{padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(255,255,255,0.20);background:rgba(80,20,20,0.8);color:#ffd0d0;}
+#editIndicator.on{background:rgba(20,80,20,0.85);color:#d5ffd5;}
+#autoStatus{position:fixed;top:108px;left:50%;transform:translateX(-50%);padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.65);color:#d7f7d7;font:12px/1.35 system-ui,Arial;display:none;z-index:70;pointer-events:none;white-space:nowrap;}
+#selInfo{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:8px 18px;background:rgba(0,0,0,0.8);color:#aaddff;border-radius:8px;font-size:13px;display:none;z-index:60;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit &nbsp; M = Edit Mode</div>
+<div id="doorHint" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#c8d8ff;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(150,170,255,0.4);">Press E — Return to Floor 2</div>
+<div id="fadeOverlay"></div>
+<div id="editHud">
+  <button id="editBtn" type="button">Edit Mode</button>
+  <button id="saveBtn" type="button">Save Layout</button>
+  <button id="loadBtn" type="button">Load Layout</button>
+  <button id="clearBtn" type="button">Clear Save</button>
+  <div id="editIndicator">OFF</div>
+</div>
+<div id="autoStatus"></div>
+<div id="selInfo"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+const FLOOR_ID="midnight_room";
+const STORAGE_KEY=FLOOR_ID+"_layout";
+
+let scene,camera,renderer;
+let moveForward=false,moveBackward=false,turnLeft=false,turnRight=false;
+let yaw=Math.PI,prevTime=performance.now();
+const S=0.5;
+const RW=1050*S,RD=950*S,RH=520*S;
+
+let EDIT_MODE=false,selectedObject=null;
+const editableObjects=[],raycaster=new THREE.Raycaster(),mouse=new THREE.Vector2();
+let _isDirty=false;
+function markEdited(){_isDirty=true;}
+function setEditId(obj,id){if(!obj.userData)obj.userData={};if(!obj.userData.editId)obj.userData.editId=String(id);}
+let _ec=0;
+function addGroup(g,hint){setEditId(g,hint||("grp_"+(++_ec)));editableObjects.push(g);scene.add(g);return g;}
+function showAutoStatus(msg,ok=true){const el=document.getElementById("autoStatus");if(!el)return;el.style.display="block";el.style.color=ok?"#d7f7d7":"#ffd7d7";el.textContent=msg;setTimeout(()=>{el.style.display="none";},2200);}
+function updateEditUI(){const ind=document.getElementById("editIndicator");ind.textContent=EDIT_MODE?"ON":"OFF";ind.classList.toggle("on",EDIT_MODE);const btn=document.getElementById("editBtn");btn.textContent=EDIT_MODE?"✏️ Edit Mode: ON":"Edit Mode: OFF";btn.style.background=EDIT_MODE?"rgba(20,80,20,0.85)":"rgba(0,0,0,0.72)";btn.style.color=EDIT_MODE?"#d5ffd5":"#eee";}
+function toggleEditMode(){EDIT_MODE=!EDIT_MODE;if(!EDIT_MODE){selectedObject=null;document.getElementById("selInfo").style.display="none";}updateEditUI();}
+function saveLayout(){const objects=editableObjects.map(o=>{const wp=new THREE.Vector3();o.getWorldPosition(wp);const wq=new THREE.Quaternion();o.getWorldQuaternion(wq);return{id:o.userData.editId,position:{x:wp.x,y:wp.y,z:wp.z},quaternion:{x:wq.x,y:wq.y,z:wq.z,w:wq.w},scale:{x:o.scale.x,y:o.scale.y,z:o.scale.z}};});localStorage.setItem(STORAGE_KEY,JSON.stringify({version:1,savedAt:Date.now(),objects}));_isDirty=false;showAutoStatus("✅ Layout saved",true);}
+function loadLayout(){const json=localStorage.getItem(STORAGE_KEY);if(!json){showAutoStatus("No saved layout found",false);return;}try{const d=JSON.parse(json);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}showAutoStatus("✅ Layout loaded",true);}catch(e){showAutoStatus("Load failed: "+e.message,false);}}
+function clearAutoSave(){localStorage.removeItem(STORAGE_KEY);showAutoStatus("🗑 Save cleared",true);}
+
+function onMouseClick(e){if(!EDIT_MODE)return;const rect=renderer.domElement.getBoundingClientRect();mouse.x=((e.clientX-rect.left)/rect.width)*2-1;mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;raycaster.setFromCamera(mouse,camera);const meshes=[];editableObjects.forEach(o=>{if(o.isMesh)meshes.push(o);else o.traverse(ch=>{if(ch.isMesh)meshes.push(ch);});});const hits=raycaster.intersectObjects(meshes,false);if(!hits.length){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}let obj=hits[0].object,cur=obj;while(cur){if(editableObjects.includes(cur)){obj=cur;break;}cur=cur.parent;}if(!editableObjects.includes(obj)){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}selectedObject=obj;const eid=obj.userData&&obj.userData.editId?obj.userData.editId:"object";const si=document.getElementById("selInfo");si.style.display="block";si.textContent=`✏️ Selected: ${eid} | Arrows=Move  Shift+↑↓=Height  R=Rotate  Del=Delete`;showAutoStatus("Selected: "+eid,true);}
+
+function onKeyDown(e){
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code))e.preventDefault();
+  if(e.code==="KeyM"){toggleEditMode();return;}
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if(e.code==="KeyE"&&nearExit&&!exitTriggered){exitTriggered=true;document.getElementById("doorHint").style.display="none";document.getElementById("exitFade").classList.add("show");if(window.SoundSystem)SoundSystem.play('doorOpen');
+        setTimeout(()=>window.location.href="floor2.html?from=midnight_room",600);return;}
+  if(EDIT_MODE&&selectedObject){
+    if(e.code==="Delete"||e.code==="Backspace"){e.preventDefault();scene.remove(selectedObject);const idx=editableObjects.indexOf(selectedObject);if(idx>-1)editableObjects.splice(idx,1);showAutoStatus("🗑 Deleted: "+selectedObject.userData.editId,true);selectedObject=null;document.getElementById("selInfo").style.display="none";markEdited();return;}
+    const speed=e.shiftKey?1:8;let moved=false;
+    if(!e.shiftKey){if(e.code==="ArrowUp"){selectedObject.position.z-=speed;moved=true;}if(e.code==="ArrowDown"){selectedObject.position.z+=speed;moved=true;}if(e.code==="ArrowLeft"){selectedObject.position.x-=speed;moved=true;}if(e.code==="ArrowRight"){selectedObject.position.x+=speed;moved=true;}}
+    if(e.shiftKey&&e.code==="ArrowUp"){selectedObject.position.y+=speed;moved=true;}if(e.shiftKey&&e.code==="ArrowDown"){selectedObject.position.y-=speed;moved=true;}
+    if(e.code==="KeyR"){selectedObject.rotation.y+=e.shiftKey?0.05:0.1;moved=true;}
+    if(moved){markEdited();return;}
+  }
+  if(!EDIT_MODE){if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=true;if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=true;if(e.code==="ArrowLeft")turnLeft=true;if(e.code==="ArrowRight")turnRight=true;}
+}
+function onKeyUp(e){if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=false;if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=false;if(e.code==="ArrowLeft")turnLeft=false;if(e.code==="ArrowRight")turnRight=false;}
+
+function makePainting(pw,ph,drawFn,id){
+  const g=new THREE.Group();
+  const frame=new THREE.Mesh(new THREE.BoxGeometry(pw+12*S,ph+12*S,10*S),new THREE.MeshLambertMaterial({color:0x1a1828}));g.add(frame);
+  const lip=new THREE.Mesh(new THREE.BoxGeometry(pw+6*S,ph+6*S,11*S),new THREE.MeshLambertMaterial({color:0x0a0c14}));lip.position.z=0.5*S;g.add(lip);
+  const c=document.createElement('canvas');c.width=512;c.height=Math.round(512*ph/pw);
+  drawFn(c.getContext('2d'),c.width,c.height);
+  const tex=new THREE.CanvasTexture(c);tex.encoding=THREE.sRGBEncoding;
+  const surf=new THREE.Mesh(new THREE.PlaneGeometry(pw,ph),new THREE.MeshLambertMaterial({map:tex,side:THREE.DoubleSide}));surf.position.z=6*S;g.add(surf);
+  addGroup(g,id);return g;
+}
+
+function drawMoonscape(ctx,w,h){
+  const sky=ctx.createLinearGradient(0,0,0,h);sky.addColorStop(0,'#020408');sky.addColorStop(0.5,'#060c18');sky.addColorStop(1,'#0a1428');
+  ctx.fillStyle=sky;ctx.fillRect(0,0,w,h);
+  // Stars
+  for(let i=0;i<80;i++){ctx.fillStyle=`rgba(255,255,255,${0.3+Math.random()*0.7})`;ctx.beginPath();ctx.arc(Math.random()*w,Math.random()*h*0.65,Math.random()*1.5,0,Math.PI*2);ctx.fill();}
+  // Moon
+  const moonG=ctx.createRadialGradient(w*0.72,h*0.18,2,w*0.72,h*0.18,50);moonG.addColorStop(0,'#f0f0e0');moonG.addColorStop(0.6,'#d8d8c8');moonG.addColorStop(1,'#b0b0a0');
+  ctx.fillStyle=moonG;ctx.beginPath();ctx.arc(w*0.72,h*0.18,50,0,Math.PI*2);ctx.fill();
+  // Moon craters
+  ctx.fillStyle='rgba(160,160,148,0.5)';[[w*0.68,h*0.14,8],[w*0.76,h*0.22,5],[w*0.71,h*0.24,3]].forEach(([cx,cy,r])=>{ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fill();});
+  // Moon glow
+  const glowG=ctx.createRadialGradient(w*0.72,h*0.18,40,w*0.72,h*0.18,120);glowG.addColorStop(0,'rgba(220,230,255,0.15)');glowG.addColorStop(1,'transparent');
+  ctx.fillStyle=glowG;ctx.beginPath();ctx.arc(w*0.72,h*0.18,120,0,Math.PI*2);ctx.fill();
+  // Dark hills silhouette
+  ctx.fillStyle='#04060c';
+  ctx.beginPath();ctx.moveTo(0,h);ctx.lineTo(0,h*0.72);ctx.quadraticCurveTo(w*0.15,h*0.55,w*0.3,h*0.68);ctx.quadraticCurveTo(w*0.45,h*0.48,w*0.55,h*0.65);ctx.quadraticCurveTo(w*0.7,h*0.5,w*0.85,h*0.62);ctx.quadraticCurveTo(w*0.93,h*0.55,w,h*0.65);ctx.lineTo(w,h);ctx.closePath();ctx.fill();
+  // Moonlit water reflection
+  ctx.fillStyle='#080e1c';ctx.fillRect(0,h*0.78,w,h*0.22);
+  ctx.fillStyle='rgba(180,190,220,0.15)';ctx.fillRect(w*0.55,h*0.78,w*0.25,h*0.22);
+  for(let i=0;i<5;i++){ctx.strokeStyle=`rgba(180,190,220,${0.05+i*0.03})`;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(w*0.52,h*(0.8+i*0.04));ctx.lineTo(w*0.88,h*(0.8+i*0.04));ctx.stroke();}
+}
+
+function drawNightForest(ctx,w,h){
+  ctx.fillStyle='#030508';ctx.fillRect(0,0,w,h);
+  // Night sky gradient
+  const sky=ctx.createLinearGradient(0,0,0,h*0.5);sky.addColorStop(0,'#020306');sky.addColorStop(1,'#060c14');
+  ctx.fillStyle=sky;ctx.fillRect(0,0,w,h*0.5);
+  // Stars
+  for(let i=0;i<60;i++){ctx.fillStyle=`rgba(200,210,255,${0.2+Math.random()*0.6})`;ctx.beginPath();ctx.arc(Math.random()*w,Math.random()*h*0.45,Math.random()*1.2,0,Math.PI*2);ctx.fill();}
+  // Moon peek
+  ctx.fillStyle='rgba(220,225,200,0.6)';ctx.beginPath();ctx.arc(w*0.2,h*0.08,28,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='rgba(200,205,180,0.3)';ctx.beginPath();ctx.arc(w*0.21,h*0.07,40,0,Math.PI*2);ctx.fill();
+  // Tree trunks
+  ctx.fillStyle='#020306';
+  const trees=[[w*0.05,h*0.35,18,h*0.65],[w*0.15,h*0.28,14,h*0.72],[w*0.28,h*0.32,20,h*0.68],[w*0.42,h*0.25,16,h*0.75],[w*0.58,h*0.3,22,h*0.7],[w*0.72,h*0.26,15,h*0.74],[w*0.85,h*0.33,18,h*0.67],[w*0.96,h*0.29,14,h*0.71]];
+  trees.forEach(([x,y,w2,h2])=>{ctx.fillRect(x-w2/2,y,w2,h2);});
+  // Tree tops
+  trees.forEach(([x,y,w2])=>{
+    ctx.fillStyle='#030408';
+    ctx.beginPath();ctx.moveTo(x,y-60);ctx.lineTo(x+w2*2.5,y+10);ctx.lineTo(x-w2*2.5,y+10);ctx.closePath();ctx.fill();
+    ctx.beginPath();ctx.moveTo(x,y-90);ctx.lineTo(x+w2*2,y-30);ctx.lineTo(x-w2*2,y-30);ctx.closePath();ctx.fill();
+  });
+  // Moonlit path
+  ctx.fillStyle='rgba(140,150,170,0.15)';ctx.beginPath();ctx.moveTo(w*0.4,h);ctx.lineTo(w*0.45,h*0.6);ctx.lineTo(w*0.55,h*0.6);ctx.lineTo(w*0.6,h);ctx.closePath();ctx.fill();
+}
+
+function drawStarMap(ctx,w,h){
+  ctx.fillStyle='#010204';ctx.fillRect(0,0,w,h);
+  // Star field
+  for(let i=0;i<120;i++){const size=Math.random();ctx.fillStyle=`rgba(200,215,255,${0.2+size*0.8})`;ctx.beginPath();ctx.arc(Math.random()*w,Math.random()*h,size,0,Math.PI*2);ctx.fill();}
+  // Constellation lines
+  ctx.strokeStyle='rgba(150,170,220,0.3)';ctx.lineWidth=1;
+  const stars=[[w*0.2,h*0.2],[w*0.35,h*0.15],[w*0.5,h*0.25],[w*0.65,h*0.18],[w*0.8,h*0.3],[w*0.7,h*0.45],[w*0.55,h*0.5],[w*0.4,h*0.4],[w*0.25,h*0.35],[w*0.15,h*0.5],[w*0.3,h*0.65],[w*0.5,h*0.7],[w*0.65,h*0.6],[w*0.8,h*0.55],[w*0.9,h*0.7]];
+  [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,8],[8,9],[9,10],[10,11],[11,12],[12,13],[6,11],[2,7]].forEach(([a,b])=>{ctx.beginPath();ctx.moveTo(stars[a][0],stars[a][1]);ctx.lineTo(stars[b][0],stars[b][1]);ctx.stroke();});
+  stars.forEach(([x,y],i)=>{const sz=i%4===0?3:1.5;ctx.fillStyle=i%4===0?'rgba(255,255,220,0.9)':'rgba(200,215,255,0.7)';ctx.beginPath();ctx.arc(x,y,sz,0,Math.PI*2);ctx.fill();});
+  // Nebula wash
+  const neb=ctx.createRadialGradient(w*0.5,h*0.5,0,w*0.5,h*0.5,w*0.4);neb.addColorStop(0,'rgba(30,20,60,0.4)');neb.addColorStop(1,'transparent');
+  ctx.fillStyle=neb;ctx.fillRect(0,0,w,h);
+}
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById("fadeOverlay");if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x010204);
+  scene.fog=new THREE.Fog(0x010204,500,1800);
+  camera=new THREE.PerspectiveCamera(72,window.innerWidth/window.innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Moonlit blue-silver lighting — bright enough to see but atmospheric
+  scene.add(new THREE.AmbientLight(0x1a2035,2.0));
+  // Main moonbeam — bright silver-blue shaft from above
+  const moon=new THREE.PointLight(0xc8d8ff,3.5,900);moon.position.set(0,RH-30*S,0);scene.add(moon);
+  // Secondary fill — cooler blue
+  const fill1=new THREE.PointLight(0x8899cc,1.8,700);fill1.position.set(-RW/3,RH*0.6,RD/4);scene.add(fill1);
+  const fill2=new THREE.PointLight(0x8899cc,1.8,700);fill2.position.set(RW/3,RH*0.6,RD/4);scene.add(fill2);
+  // Window moonlight pool on floor
+  const winLight=new THREE.PointLight(0xd0e0ff,2.5,400);winLight.position.set(RW/2-60*S,200*S,0);scene.add(winLight);
+  // Candlelight — single warm candle glow
+  const candle=new THREE.PointLight(0xffaa44,1.2,200);candle.position.set(0,140*S,RD/3);scene.add(candle);
+  window._moonLights=[moon,fill1,fill2];
+
+  buildRoom();
+
+  const _saved=localStorage.getItem(STORAGE_KEY);
+  if(_saved){try{const d=JSON.parse(_saved);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}}catch(err){}}
+
+  document.getElementById("editBtn").addEventListener("click",toggleEditMode);
+  document.getElementById("saveBtn").addEventListener("click",saveLayout);
+  document.getElementById("loadBtn").addEventListener("click",loadLayout);
+  document.getElementById("clearBtn").addEventListener("click",clearAutoSave);
+  renderer.domElement.addEventListener("click",onMouseClick);
+  document.addEventListener("keydown",onKeyDown);
+  document.addEventListener("keyup",onKeyUp);
+  window.addEventListener("resize",onResize);
+
+  camera.position.set(0,240*S,RD/2-120*S);
+  yaw=0;updateRotation();animate();
+}
+
+function buildRoom(){
+  const darkWall=new THREE.MeshLambertMaterial({color:0x06080e});
+  const darkFloor=new THREE.MeshLambertMaterial({color:0x040608});
+  const darkWood=new THREE.MeshLambertMaterial({color:0x0c0806});
+  const richWood=new THREE.MeshLambertMaterial({color:0x1a1008});
+  const midWood=new THREE.MeshLambertMaterial({color:0x140e06});
+  const navyMat=new THREE.MeshLambertMaterial({color:0x08101e});
+  const indigoMat=new THREE.MeshLambertMaterial({color:0x0c0c20});
+  const silverMat=new THREE.MeshLambertMaterial({color:0x6070a0,emissive:0x1a2040,emissiveIntensity:0.3});
+  const moonsilver=new THREE.MeshLambertMaterial({color:0x8090c0,emissive:0x202844,emissiveIntensity:0.4});
+  const velvetNight=new THREE.MeshLambertMaterial({color:0x060c18});
+  const velvetIndigo=new THREE.MeshLambertMaterial({color:0x0e0a1c});
+  const creamMat=new THREE.MeshLambertMaterial({color:0xc8c0a8});
+  const ironMat=new THREE.MeshLambertMaterial({color:0x12141a});
+
+  // ── Floor — dark stone tiles ──
+  const tSz=55*S;
+  for(let ix=0;ix<Math.ceil(RW/tSz);ix++)for(let iz=0;iz<Math.ceil(RD/tSz);iz++){
+    const col=(ix+iz)%2===0?0x050608:0x080a10;
+    const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-1,1.5*S,tSz-1),new THREE.MeshLambertMaterial({color:col}));
+    t.position.set(-RW/2+tSz*(ix+0.5),0.5*S,-RD/2+tSz*(iz+0.5));scene.add(t);
+  }
+
+  // ── Walls ──
+  const backWall=new THREE.Mesh(new THREE.BoxGeometry(RW,RH,14*S),darkWall);backWall.position.set(0,RH/2,-RD/2+7*S);scene.add(backWall);
+  const leftWall=new THREE.Mesh(new THREE.BoxGeometry(14*S,RH,RD),darkWall);leftWall.position.set(-RW/2+7*S,RH/2,0);scene.add(leftWall);
+  const rightWall=leftWall.clone();rightWall.position.x=RW/2-7*S;scene.add(rightWall);
+  const doorGapW=190*S;
+  const fSideW=(RW-doorGapW)/2;
+  const ffL=new THREE.Mesh(new THREE.BoxGeometry(fSideW,RH,14*S),darkWall);ffL.position.set(-(doorGapW/2+fSideW/2),RH/2,RD/2-7*S);scene.add(ffL);
+  const ffR=ffL.clone();ffR.position.x=doorGapW/2+fSideW/2;scene.add(ffR);
+  const lintel=new THREE.Mesh(new THREE.BoxGeometry(doorGapW,50*S,14*S),darkWall);lintel.position.set(0,RH-25*S,RD/2-7*S);scene.add(lintel);
+
+  // ── Star-painted ceiling ──
+  const ceilMat=new THREE.MeshLambertMaterial({color:0x020306});
+  const ceil=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),ceilMat);ceil.rotation.x=Math.PI/2;ceil.position.y=RH;scene.add(ceil);
+  // Star dots on ceiling
+  for(let i=0;i<60;i++){
+    const star=new THREE.Mesh(new THREE.SphereGeometry(1.5*S,4,4),new THREE.MeshLambertMaterial({color:0xc8d0f0,emissive:0x6070c0,emissiveIntensity:0.8}));
+    star.position.set((Math.random()-0.5)*RW*0.85,RH-1*S,(Math.random()-0.5)*RD*0.85);scene.add(star);
+  }
+  // Ceiling cornice — dark
+  [[new THREE.BoxGeometry(RW+14*S,12*S,14*S),0,RH-6*S,-RD/2+7*S],
+   [new THREE.BoxGeometry(RW+14*S,12*S,14*S),0,RH-6*S, RD/2-7*S],
+   [new THREE.BoxGeometry(14*S,12*S,RD),     -RW/2+7*S,RH-6*S,0],
+   [new THREE.BoxGeometry(14*S,12*S,RD),      RW/2-7*S,RH-6*S,0],
+  ].forEach(([geo,x,y,z])=>{const m=new THREE.Mesh(geo,navyMat);m.position.set(x,y,z);scene.add(m);});
+
+  // ── Moon window — right wall, tall ──
+  // Window recess
+  const winW=140*S,winH=220*S;
+  const winRecess=new THREE.Mesh(new THREE.BoxGeometry(20*S,winH,winW),new THREE.MeshLambertMaterial({color:0x0a0c14}));
+  winRecess.position.set(RW/2-7*S,280*S,0);scene.add(winRecess);
+  // Moon glow plane (simulated moonlight coming through)
+  const moonGlowMat=new THREE.MeshLambertMaterial({color:0xd0e0ff,emissive:0x6080cc,emissiveIntensity:0.6,transparent:true,opacity:0.35,side:THREE.DoubleSide});
+  const moonGlow=new THREE.Mesh(new THREE.PlaneGeometry(winW-10*S,winH-10*S),moonGlowMat);
+  moonGlow.rotation.y=Math.PI/2;moonGlow.position.set(RW/2-3*S,280*S,0);scene.add(moonGlow);
+  // Moonlight shaft on floor
+  const shaftMat=new THREE.MeshLambertMaterial({color:0x8090b8,transparent:true,opacity:0.08,side:THREE.DoubleSide});
+  const shaft=new THREE.Mesh(new THREE.PlaneGeometry(winW,RH),shaftMat);
+  shaft.rotation.y=Math.PI/2;shaft.rotation.z=0.15;shaft.position.set(RW/2-100*S,RH/2-50*S,0);scene.add(shaft);
+  // Moonbeam on floor
+  const beamFloor=new THREE.Mesh(new THREE.PlaneGeometry(winW,180*S),new THREE.MeshLambertMaterial({color:0xaabbdd,transparent:true,opacity:0.12}));
+  beamFloor.rotation.x=-Math.PI/2;beamFloor.position.set(RW/2-130*S,1*S,0);scene.add(beamFloor);
+  // Window frame
+  const wFrameMat=new THREE.MeshLambertMaterial({color:0x0c1020});
+  [[-winW/2,0],[winW/2,0]].forEach(([wz])=>{const f=new THREE.Mesh(new THREE.BoxGeometry(22*S,winH+12*S,8*S),wFrameMat);f.rotation.y=Math.PI/2;f.position.set(RW/2-6*S,280*S,wz);scene.add(f);});
+  // Cross bars
+  const hBar=new THREE.Mesh(new THREE.BoxGeometry(22*S,8*S,winW),wFrameMat);hBar.rotation.y=Math.PI/2;hBar.position.set(RW/2-6*S,280*S,0);scene.add(hBar);
+
+  // ── Entrance doors — dark with moon motif ──
+  const dW=88*S,dH=RH*0.86,dThick=10*S;
+  const doorZ=RD/2-6*S;
+  const doorMat=new THREE.MeshLambertMaterial({color:0x080a10});
+  const doorFrameMat=new THREE.MeshLambertMaterial({color:0x0c1018});
+  [-1,1].forEach(s=>{
+    const fr=new THREE.Mesh(new THREE.BoxGeometry(14*S,dH+14*S,dThick+4*S),doorFrameMat);fr.position.set(s*(dW+7*S),dH/2,doorZ);scene.add(fr);
+    const door=new THREE.Mesh(new THREE.BoxGeometry(dW,dH,dThick),doorMat);door.position.set(s*dW/2,dH/2,doorZ);scene.add(door);
+    // Moon circle on each door
+    const moonDisc=new THREE.Mesh(new THREE.CylinderGeometry(20*S,20*S,3*S,20),moonsilver);moonDisc.rotation.x=Math.PI/2;moonDisc.position.set(s*dW/2,dH*0.7,doorZ+6*S);scene.add(moonDisc);
+    const moonInner=new THREE.Mesh(new THREE.CylinderGeometry(14*S,14*S,4*S,20),new THREE.MeshLambertMaterial({color:0xd0e0ff,emissive:0x6080cc,emissiveIntensity:0.5}));moonInner.rotation.x=Math.PI/2;moonInner.position.set(s*dW/2,dH*0.7,doorZ+7*S);scene.add(moonInner);
+    // Vertical panels
+    for(let i=0;i<3;i++){const pl=new THREE.Mesh(new THREE.BoxGeometry(4*S,dH*0.35,3*S),new THREE.MeshLambertMaterial({color:0x0e1220}));pl.position.set(s*dW/2-dW/2+10*S+i*24*S,dH*0.3,doorZ+6*S);scene.add(pl);}
+    // Silver handle
+    const hdl=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,16*S,8),silverMat);hdl.rotation.z=Math.PI/2;hdl.position.set(s*(dW-12*S),dH*0.46,doorZ+6*S);scene.add(hdl);
+  });
+  const topFrame=new THREE.Mesh(new THREE.BoxGeometry(dW*2+28*S+8*S,14*S,dThick+4*S),doorFrameMat);topFrame.position.set(0,dH+7*S,doorZ);scene.add(topFrame);
+  const div=new THREE.Mesh(new THREE.BoxGeometry(5*S,dH,dThick+2*S),doorFrameMat);div.position.set(0,dH/2,doorZ);scene.add(div);
+
+  // ── BED — grand, dark, with midnight blue canopy ──
+  const bedG=new THREE.Group();
+  const bedW=310*S,bedL=420*S,bedH=70*S,mattH=28*S;
+  const bedBase=new THREE.Mesh(new THREE.BoxGeometry(bedW+16*S,bedH,bedL+16*S),darkWood);bedBase.position.set(0,bedH/2,0);bedG.add(bedBase);
+  const matt=new THREE.Mesh(new THREE.BoxGeometry(bedW,mattH,bedL),new THREE.MeshLambertMaterial({color:0xc0b8a8}));matt.position.set(0,bedH+mattH/2,0);bedG.add(matt);
+  // Midnight blue coverlet
+  const cover=new THREE.Mesh(new THREE.BoxGeometry(bedW-4*S,mattH*0.5,bedL*0.72),velvetNight);cover.position.set(0,bedH+mattH+mattH*0.25,bedL*0.1);bedG.add(cover);
+  const covTrim=new THREE.Mesh(new THREE.BoxGeometry(bedW-4*S,3*S,7*S),silverMat);covTrim.position.set(0,bedH+mattH+mattH*0.5,bedL*0.1+bedL*0.72/2);bedG.add(covTrim);
+  [-1,1].forEach(s=>{const p=new THREE.Mesh(new THREE.BoxGeometry(118*S,16*S,66*S),creamMat);p.position.set(s*80*S,bedH+mattH+16*S,-bedL/2+46*S);bedG.add(p);});
+  // Dark turned posts
+  const postH=RH*0.82;
+  [[-bedW/2,-bedL/2],[bedW/2,-bedL/2],[-bedW/2,bedL/2],[bedW/2,bedL/2]].forEach(([px,pz])=>{
+    const post=new THREE.Mesh(new THREE.CylinderGeometry(11*S,13*S,postH,8),darkWood);post.position.set(px,postH/2,pz);bedG.add(post);
+    [postH*0.2,postH*0.5,postH*0.78].forEach(py=>{const ring=new THREE.Mesh(new THREE.CylinderGeometry(15*S,15*S,8*S,8),richWood);ring.position.set(px,py,pz);bedG.add(ring);});
+    const finial=new THREE.Mesh(new THREE.SphereGeometry(14*S,8,8),moonsilver);finial.position.set(px,postH+12*S,pz);bedG.add(finial);
+    const base=new THREE.Mesh(new THREE.BoxGeometry(28*S,18*S,28*S),darkWood);base.position.set(px,9*S,pz);bedG.add(base);
+  });
+  // Headboard
+  const hb=new THREE.Mesh(new THREE.BoxGeometry(bedW+10*S,200*S,16*S),darkWood);hb.position.set(0,bedH+100*S,-bedL/2-4*S);bedG.add(hb);
+  const hbPanel=new THREE.Mesh(new THREE.BoxGeometry(bedW-18*S,164*S,7*S),velvetIndigo);hbPanel.position.set(0,bedH+100*S,-bedL/2+5*S);bedG.add(hbPanel);
+  const hbMoon=new THREE.Mesh(new THREE.CylinderGeometry(24*S,24*S,5*S,20),moonsilver);hbMoon.rotation.x=Math.PI/2;hbMoon.position.set(0,bedH+155*S,-bedL/2+6*S);bedG.add(hbMoon);
+  const hbArch=new THREE.Mesh(new THREE.CylinderGeometry((bedW+10*S)/2,(bedW+10*S)/2,16*S,20,1,false,0,Math.PI),darkWood);hbArch.rotation.z=Math.PI/2;hbArch.rotation.y=Math.PI/2;hbArch.position.set(0,bedH+200*S,-bedL/2-4*S);bedG.add(hbArch);
+  // Canopy top
+  const canopyTop=new THREE.Mesh(new THREE.BoxGeometry(bedW+28*S,10*S,bedL+28*S),darkWood);canopyTop.position.set(0,postH+5*S,0);bedG.add(canopyTop);
+  // Midnight blue drapes
+  const drapeMat=new THREE.MeshLambertMaterial({color:0x060c1a,transparent:true,opacity:0.75,side:THREE.DoubleSide});
+  [[-bedW/2-2*S,0,Math.PI/2],[bedW/2+2*S,0,-Math.PI/2],[0,-bedL/2-2*S,0],[0,bedL/2+2*S,Math.PI]].forEach(([dx,dz,ry])=>{
+    const drapeW=dx!==0?bedL:bedW;
+    const drape=new THREE.Mesh(new THREE.PlaneGeometry(drapeW,postH),drapeMat);drape.rotation.y=ry;drape.position.set(dx,postH/2,dz);bedG.add(drape);
+    const tassel=new THREE.Mesh(new THREE.BoxGeometry(drapeW,8*S,3*S),silverMat);tassel.rotation.y=ry;tassel.position.set(dx,14*S,dz);bedG.add(tassel);
+  });
+  bedG.position.set(0,0,-RD/2+bedL/2+28*S);
+  addGroup(bedG,"midnight_bed");
+
+  // ── Bedside tables ──
+  [-1,1].forEach((s,i)=>{
+    const bG=new THREE.Group();
+    const bTop=new THREE.Mesh(new THREE.BoxGeometry(74*S,7*S,64*S),richWood);bTop.position.set(0,80*S,0);bG.add(bTop);
+    const bBody=new THREE.Mesh(new THREE.BoxGeometry(72*S,72*S,62*S),darkWood);bBody.position.set(0,38*S,0);bG.add(bBody);
+    // Silver candlestick
+    const cBase=new THREE.Mesh(new THREE.CylinderGeometry(9*S,12*S,8*S,10),silverMat);cBase.position.set(0,88*S,0);bG.add(cBase);
+    const cStem=new THREE.Mesh(new THREE.CylinderGeometry(3*S,5*S,40*S,8),silverMat);cStem.position.set(0,108*S,0);bG.add(cStem);
+    const candle=new THREE.Mesh(new THREE.CylinderGeometry(3.5*S,3.5*S,20*S,8),creamMat);candle.position.set(0,128*S,0);bG.add(candle);
+    const flame=new THREE.Mesh(new THREE.SphereGeometry(3.5*S,6,6),new THREE.MeshLambertMaterial({color:0xff9900,emissive:0x774400,emissiveIntensity:1}));flame.position.set(0,140*S,0);bG.add(flame);
+    bG.position.set(s*(310*S/2+48*S),0,-RD/2+88*S);
+    addGroup(bG,"bedside_"+(i===0?"left":"right"));
+  });
+
+  // ── Dark wardrobe — left wall ──
+  const wardG=new THREE.Group();
+  const wdW=280*S,wdH=400*S,wdD=64*S;
+  const wdBody=new THREE.Mesh(new THREE.BoxGeometry(wdW,wdH,wdD),darkWood);wdBody.position.set(0,wdH/2,0);wardG.add(wdBody);
+  const wdCrown=new THREE.Mesh(new THREE.BoxGeometry(wdW+14*S,18*S,wdD+8*S),richWood);wdCrown.position.set(0,wdH+9*S,0);wardG.add(wdCrown);
+  const wdBase2=new THREE.Mesh(new THREE.BoxGeometry(wdW+10*S,12*S,wdD+5*S),richWood);wdBase2.position.set(0,6*S,0);wardG.add(wdBase2);
+  [-1,1].forEach(s=>{
+    const wdDoor=new THREE.Mesh(new THREE.BoxGeometry(wdW/2-4*S,wdH-18*S,8*S),midWood);wdDoor.position.set(s*wdW/4,wdH/2,wdD/2+2*S);wardG.add(wdDoor);
+    [wdH*0.22,wdH*0.52,wdH*0.76].forEach(py=>{const pnl=new THREE.Mesh(new THREE.BoxGeometry(wdW/2-22*S,wdH*0.17,5*S),navyMat);pnl.position.set(s*wdW/4,py,wdD/2+3.5*S);wardG.add(pnl);});
+    const knob=new THREE.Mesh(new THREE.SphereGeometry(5*S,8,8),silverMat);knob.position.set(s*7*S,wdH*0.5,wdD/2+6*S);wardG.add(knob);
+    // Moon mirror
+    const mirror=new THREE.Mesh(new THREE.CylinderGeometry(wdW/4-16*S,wdW/4-16*S,4*S,16),new THREE.MeshLambertMaterial({color:0x8090b8,emissive:0x1a2040,emissiveIntensity:0.3}));mirror.rotation.x=Math.PI/2;mirror.position.set(s*wdW/4,wdH*0.85,wdD/2+4*S);wardG.add(mirror);
+  });
+  const wdDiv=new THREE.Mesh(new THREE.BoxGeometry(7*S,wdH,wdD+3*S),richWood);wdDiv.position.set(0,wdH/2,0);wardG.add(wdDiv);
+  wardG.position.set(-RW/2+wdD/2+10*S,0,RD/8);
+  addGroup(wardG,"wardrobe");
+
+  // ── Writing desk + chair — right side ──
+  const deskG=new THREE.Group();
+  const dtW=170*S,dtH=88*S,dtD=55*S;
+  const dkTop=new THREE.Mesh(new THREE.BoxGeometry(dtW,8*S,dtD),richWood);dkTop.position.set(0,dtH,0);deskG.add(dkTop);
+  const dkFront=new THREE.Mesh(new THREE.BoxGeometry(dtW,dtH,10*S),darkWood);dkFront.position.set(0,dtH/2,dtD/2-5*S);deskG.add(dkFront);
+  [-1,1].forEach(s=>{const side=new THREE.Mesh(new THREE.BoxGeometry(10*S,dtH,dtD),darkWood);side.position.set(s*(dtW/2-5*S),dtH/2,0);deskG.add(side);});
+  // Green baize — moonlit
+  const baize=new THREE.Mesh(new THREE.BoxGeometry(dtW-12*S,3*S,dtD-10*S),new THREE.MeshLambertMaterial({color:0x0a1810}));baize.position.set(0,dtH+5*S,0);deskG.add(baize);
+  // Candle + book on desk
+  const bookMesh=new THREE.Mesh(new THREE.BoxGeometry(28*S,8*S,38*S),navyMat);bookMesh.position.set(-30*S,dtH+8*S,0);deskG.add(bookMesh);
+  const deskCandle=new THREE.Mesh(new THREE.CylinderGeometry(3*S,3*S,18*S,8),creamMat);deskCandle.position.set(40*S,dtH+12*S,0);deskG.add(deskCandle);
+  const deskFlame=new THREE.Mesh(new THREE.SphereGeometry(3.5*S,6,6),new THREE.MeshLambertMaterial({color:0xff9900,emissive:0x774400,emissiveIntensity:1}));deskFlame.position.set(40*S,dtH+22*S,0);deskG.add(deskFlame);
+  deskG.position.set(RW/2-dtD/2-10*S,0,-RD/4);deskG.rotation.y=-Math.PI/2;
+  addGroup(deskG,"writing_desk");
+
+  // Chair — separate
+  const chairG=new THREE.Group();
+  const cSeat=new THREE.Mesh(new THREE.BoxGeometry(78*S,12*S,68*S),velvetIndigo);cSeat.position.set(0,48*S,0);chairG.add(cSeat);
+  const cBack=new THREE.Mesh(new THREE.BoxGeometry(78*S,72*S,10*S),velvetIndigo);cBack.position.set(0,90*S,34*S);chairG.add(cBack);
+  const cBackTop=new THREE.Mesh(new THREE.BoxGeometry(82*S,10*S,14*S),darkWood);cBackTop.position.set(0,128*S,34*S);chairG.add(cBackTop);
+  [[-32*S,-26*S],[32*S,-26*S],[-32*S,26*S],[32*S,26*S]].forEach(([lx,lz])=>{const l=new THREE.Mesh(new THREE.CylinderGeometry(4*S,3.5*S,40*S,8),darkWood);l.position.set(lx,20*S,lz);chairG.add(l);});
+  chairG.position.set(RW/2-dtD-88*S,0,-RD/4);
+  addGroup(chairG,"desk_chair");
+
+  // ── Trunk at foot of bed ──
+  const trunkG=new THREE.Group();
+  const tkBody=new THREE.Mesh(new THREE.BoxGeometry(200*S,68*S,80*S),darkWood);tkBody.position.set(0,34*S,0);trunkG.add(tkBody);
+  const tkLid=new THREE.Mesh(new THREE.BoxGeometry(202*S,18*S,82*S),richWood);tkLid.position.set(0,72*S,0);trunkG.add(tkLid);
+  [-70*S,0,70*S].forEach(tx=>{const st=new THREE.Mesh(new THREE.BoxGeometry(6*S,86*S,82*S),ironMat);st.position.set(tx,34*S,0);trunkG.add(st);});
+  const hasp=new THREE.Mesh(new THREE.BoxGeometry(16*S,9*S,6*S),silverMat);hasp.position.set(0,70*S,42*S);trunkG.add(hasp);
+  trunkG.position.set(0,0,-RD/2+28*S+420*S+55*S);
+  addGroup(trunkG,"trunk");
+
+  // ── Paintings — moonlit scenes ──
+  const pic1=makePainting(130*S,100*S,drawMoonscape,"painting_moonscape");pic1.position.set(-200*S,300*S,-RD/2+12*S);
+  const pic2=makePainting(100*S,130*S,drawNightForest,"painting_forest");pic2.position.set(200*S,300*S,-RD/2+12*S);
+  const pic3=makePainting(120*S,120*S,drawStarMap,"painting_starmap");pic3.rotation.y=Math.PI/2;pic3.position.set(-RW/2+12*S,300*S,RD/8);
+
+  // ── Dark drapes flanking entrance ──
+  [-1,1].forEach(s=>{
+    const curtG=new THREE.Group();
+    const curt=new THREE.Mesh(new THREE.BoxGeometry(fSideW*0.6,RH-8*S,12*S),new THREE.MeshLambertMaterial({color:0x04060c}));curt.position.set(0,(RH-8*S)/2,0);curtG.add(curt);
+    const pelmet=new THREE.Mesh(new THREE.BoxGeometry(fSideW*0.62,18*S,16*S),darkWood);pelmet.position.set(0,RH+1*S,0);curtG.add(pelmet);
+    const tass=new THREE.Mesh(new THREE.BoxGeometry(fSideW*0.6,8*S,4*S),silverMat);tass.position.set(0,RH-10*S,5*S);curtG.add(tass);
+    curtG.position.set(s*(doorGapW/2+fSideW*0.3),0,RD/2-7*S);
+    addGroup(curtG,"curtain_"+(s<0?"left":"right"));
+  });
+
+  // ── Dark night rug ──
+  const rug=new THREE.Mesh(new THREE.BoxGeometry(RW*0.5,2*S,RD*0.45),new THREE.MeshLambertMaterial({color:0x04060e}));rug.position.set(0,1.5*S,RD/8);scene.add(rug);
+  const rugBorder=new THREE.Mesh(new THREE.BoxGeometry(RW*0.5+12*S,1.5*S,RD*0.45+12*S),silverMat);rugBorder.position.set(0,1*S,RD/8);scene.add(rugBorder);
+}
+
+function onResize(){camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);}
+function updateRotation(){camera.rotation.order="YXZ";camera.rotation.set(0,yaw,0);}
+
+const exitCooldown=(new URLSearchParams(window.location.search).get("from")==="floor2")?Date.now()+4000:0;
+let exitTriggered=false,nearExit=false;
+function checkExitDoor(){
+  if(!exitTriggered&&Date.now()>exitCooldown){
+    nearExit=Math.abs(camera.position.x)<190*S&&camera.position.z>RD/2-200*S;
+    document.getElementById("doorHint").style.display=nearExit?"block":"none";
+  }
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();const delta=(now-prevTime)/1000;prevTime=now;
+  if(!EDIT_MODE){
+    if(turnLeft)yaw+=2.2*delta;if(turnRight)yaw-=2.2*delta;
+    const mv=Number(moveForward)-Number(moveBackward);
+    if(mv!==0&&window.SoundSystem)SoundSystem.footstep();
+    const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+    camera.position.x+=fwd.x*mv*120*delta;
+    camera.position.z+=fwd.z*mv*120*delta;
+    camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2-20*S,camera.position.x));
+    camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-15*S,camera.position.z));
+    camera.position.y=240*S;
+  }
+  // Gentle moon shimmer
+  if(window._moonLights){
+    const t=now*0.0008;
+    window._moonLights.forEach((l,i)=>{l.intensity+=(Math.sin(t+i*1.3)*0.04);l.intensity=Math.max(1.2,Math.min(4.0,l.intensity));});
+  }
+  checkExitDoor();updateRotation();renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+init();
+</script>
+<script src="../floor1/sound-system.js"></script>
+<script src="../floor1/mystery-engine.js"></script>
+<script src="../floor1/mystery-state.js"></script>
+<script src="../floor1/mystery-ui.js"></script>
+<script src="../floor1/evidence-system.js"></script>
+<script>
+(async()=>{
+  await MysteryEngine.init();
+  let scenario=await MysteryState.load();
+  if(!scenario){scenario=MysteryEngine.generate();await MysteryState.save(scenario);}
+  window._scenario=scenario;
+  MysteryUI.init(scenario,false);
+  MysteryUI.setZone('midnight_room');
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'midnightchambers' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

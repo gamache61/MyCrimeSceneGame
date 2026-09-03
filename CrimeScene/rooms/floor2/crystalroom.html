@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Crystal Room</title>
+<style>
+#exitFade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9999;transition:opacity 0.6s ease;}
+#exitFade.show{opacity:1;}
+#instructionLine{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:8px 16px;font-size:14px;color:#eee;background:rgba(0,0,0,0.6);border-radius:6px;z-index:30;pointer-events:none;white-space:nowrap;}
+body{margin:0;overflow:hidden;background:#000;font-family:Arial,sans-serif;}
+canvas{display:block;}
+#fadeOverlay{position:fixed;inset:0;background:#000;z-index:9999;animation:fadeOut 0.8s ease forwards;}
+@keyframes fadeOut{from{opacity:1;}to{opacity:0;}}
+#editHud{position:fixed;top:58px;left:50%;transform:translateX(-50%);z-index:60;display:flex;gap:8px;align-items:center;font-family:system-ui,Arial,sans-serif;}
+#editBtn,#saveBtn,#loadBtn,#clearBtn{padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:rgba(0,0,0,0.72);color:#eee;cursor:pointer;user-select:none;}
+#editIndicator{padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(255,255,255,0.20);background:rgba(80,20,20,0.8);color:#ffd0d0;}
+#editIndicator.on{background:rgba(20,80,20,0.85);color:#d5ffd5;}
+#autoStatus{position:fixed;top:108px;left:50%;transform:translateX(-50%);padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.18);background:rgba(0,0,0,0.65);color:#d7f7d7;font:12px/1.35 system-ui,Arial;display:none;z-index:70;pointer-events:none;white-space:nowrap;}
+#selInfo{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:8px 18px;background:rgba(0,0,0,0.8);color:#aaddff;border-radius:8px;font-size:13px;display:none;z-index:60;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit &nbsp; M = Edit Mode</div>
+<div id="doorHint" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#aaeeff;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(150,220,255,0.4);">Press E — Return to Floor 2</div>
+<div id="fadeOverlay"></div>
+<div id="editHud">
+  <button id="editBtn" type="button">Edit Mode</button>
+  <button id="saveBtn" type="button">Save Layout</button>
+  <button id="loadBtn" type="button">Load Layout</button>
+  <button id="clearBtn" type="button">Clear Save</button>
+  <div id="editIndicator">OFF</div>
+</div>
+<div id="autoStatus"></div>
+<div id="selInfo"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+const FLOOR_ID="crystal_room";
+const STORAGE_KEY=FLOOR_ID+"_layout";
+
+let scene,camera,renderer;
+let moveForward=false,moveBackward=false,turnLeft=false,turnRight=false;
+let yaw=0,prevTime=performance.now();
+const S=0.5;
+const RW=1000*S,RD=950*S,RH=520*S;
+
+let EDIT_MODE=false,selectedObject=null;
+const editableObjects=[],raycaster=new THREE.Raycaster(),mouse=new THREE.Vector2();
+let _isDirty=false;
+function markEdited(){_isDirty=true;}
+function setEditId(obj,id){if(!obj.userData)obj.userData={};if(!obj.userData.editId)obj.userData.editId=String(id);}
+let _ec=0;
+function addGroup(g,hint){setEditId(g,hint||("grp_"+(++_ec)));editableObjects.push(g);scene.add(g);return g;}
+function showAutoStatus(msg,ok=true){const el=document.getElementById("autoStatus");if(!el)return;el.style.display="block";el.style.color=ok?"#d7f7d7":"#ffd7d7";el.textContent=msg;setTimeout(()=>{el.style.display="none";},2200);}
+function updateEditUI(){const ind=document.getElementById("editIndicator");ind.textContent=EDIT_MODE?"ON":"OFF";ind.classList.toggle("on",EDIT_MODE);const btn=document.getElementById("editBtn");btn.textContent=EDIT_MODE?"✏️ Edit Mode: ON":"Edit Mode: OFF";btn.style.background=EDIT_MODE?"rgba(20,80,20,0.85)":"rgba(0,0,0,0.72)";btn.style.color=EDIT_MODE?"#d5ffd5":"#eee";}
+function toggleEditMode(){EDIT_MODE=!EDIT_MODE;if(!EDIT_MODE){selectedObject=null;document.getElementById("selInfo").style.display="none";}updateEditUI();}
+function saveLayout(){const objects=editableObjects.map(o=>{const wp=new THREE.Vector3();o.getWorldPosition(wp);const wq=new THREE.Quaternion();o.getWorldQuaternion(wq);return{id:o.userData.editId,position:{x:wp.x,y:wp.y,z:wp.z},quaternion:{x:wq.x,y:wq.y,z:wq.z,w:wq.w},scale:{x:o.scale.x,y:o.scale.y,z:o.scale.z}};});localStorage.setItem(STORAGE_KEY,JSON.stringify({version:1,savedAt:Date.now(),objects}));_isDirty=false;showAutoStatus("✅ Layout saved",true);}
+function loadLayout(){const json=localStorage.getItem(STORAGE_KEY);if(!json){showAutoStatus("No saved layout found",false);return;}try{const d=JSON.parse(json);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}showAutoStatus("✅ Layout loaded",true);}catch(e){showAutoStatus("Load failed: "+e.message,false);}}
+function clearAutoSave(){localStorage.removeItem(STORAGE_KEY);showAutoStatus("🗑 Save cleared",true);}
+
+function onMouseClick(e){if(!EDIT_MODE)return;const rect=renderer.domElement.getBoundingClientRect();mouse.x=((e.clientX-rect.left)/rect.width)*2-1;mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;raycaster.setFromCamera(mouse,camera);const meshes=[];editableObjects.forEach(o=>{if(o.isMesh)meshes.push(o);else o.traverse(ch=>{if(ch.isMesh)meshes.push(ch);});});const hits=raycaster.intersectObjects(meshes,false);if(!hits.length){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}let obj=hits[0].object,cur=obj;while(cur){if(editableObjects.includes(cur)){obj=cur;break;}cur=cur.parent;}if(!editableObjects.includes(obj)){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}selectedObject=obj;const eid=obj.userData&&obj.userData.editId?obj.userData.editId:"object";const si=document.getElementById("selInfo");si.style.display="block";si.textContent=`✏️ Selected: ${eid} | Arrows=Move  Shift+↑↓=Height  R=Rotate  Del=Delete`;showAutoStatus("Selected: "+eid,true);}
+
+function onKeyDown(e){
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code))e.preventDefault();
+  if(e.code==="KeyM"){toggleEditMode();return;}
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if(e.code==="KeyE"&&nearExit&&!exitTriggered){exitTriggered=true;document.getElementById("doorHint").style.display="none";document.getElementById("exitFade").classList.add("show");if(window.SoundSystem)SoundSystem.play('doorOpen');
+        setTimeout(()=>window.location.href="floor2.html?from=crystal_room",600);return;}
+  if(EDIT_MODE&&selectedObject){
+    if(e.code==="Delete"||e.code==="Backspace"){e.preventDefault();scene.remove(selectedObject);const idx=editableObjects.indexOf(selectedObject);if(idx>-1)editableObjects.splice(idx,1);showAutoStatus("🗑 Deleted: "+selectedObject.userData.editId,true);selectedObject=null;document.getElementById("selInfo").style.display="none";markEdited();return;}
+    const speed=e.shiftKey?1:8;let moved=false;
+    if(!e.shiftKey){if(e.code==="ArrowUp"){selectedObject.position.z-=speed;moved=true;}if(e.code==="ArrowDown"){selectedObject.position.z+=speed;moved=true;}if(e.code==="ArrowLeft"){selectedObject.position.x-=speed;moved=true;}if(e.code==="ArrowRight"){selectedObject.position.x+=speed;moved=true;}}
+    if(e.shiftKey&&e.code==="ArrowUp"){selectedObject.position.y+=speed;moved=true;}if(e.shiftKey&&e.code==="ArrowDown"){selectedObject.position.y-=speed;moved=true;}
+    if(e.code==="KeyR"){selectedObject.rotation.y+=e.shiftKey?0.05:0.1;moved=true;}
+    if(moved){markEdited();return;}
+  }
+  if(!EDIT_MODE){if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=true;if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=true;if(e.code==="ArrowLeft")turnLeft=true;if(e.code==="ArrowRight")turnRight=true;}
+}
+function onKeyUp(e){if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=false;if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=false;if(e.code==="ArrowLeft")turnLeft=false;if(e.code==="ArrowRight")turnRight=false;}
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById("fadeOverlay");if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x020408);
+  scene.fog=new THREE.Fog(0x020408,400,1800);
+  camera=new THREE.PerspectiveCamera(72,window.innerWidth/window.innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Cool crystal blue-white lighting
+  scene.add(new THREE.AmbientLight(0x486080,0.6));
+  const c1=new THREE.PointLight(0x6699cc,1.6,1000);c1.position.set(0,RH-40*S,0);scene.add(c1);
+  const c2=new THREE.PointLight(0x7799bb,1.3,600);c2.position.set(-RW/3,RH-60*S,-RD/3);scene.add(c2);
+  const c3=new THREE.PointLight(0x7799bb,1.3,600);c3.position.set(RW/3,RH-60*S,-RD/3);scene.add(c3);
+  const c4=new THREE.PointLight(0x6688aa,0.9,500);c4.position.set(0,RH/2,RD/3);scene.add(c4);
+  // Coloured crystal accent lights
+  const cr=new THREE.PointLight(0x334488,0.8,300);cr.position.set(-RW/4,200*S,0);scene.add(cr);
+  const cb=new THREE.PointLight(0x3366bb,0.8,300);cb.position.set(RW/4,200*S,0);scene.add(cb);
+  const cg=new THREE.PointLight(0x224477,0.7,280);cg.position.set(0,200*S,-RD/4);scene.add(cg);
+  window._crystalLights=[c1,c2,c3,cr,cb,cg];
+
+  buildRoom();
+
+  const _saved=localStorage.getItem(STORAGE_KEY);
+  if(_saved){try{const d=JSON.parse(_saved);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}}catch(err){}}
+
+  document.getElementById("editBtn").addEventListener("click",toggleEditMode);
+  document.getElementById("saveBtn").addEventListener("click",saveLayout);
+  document.getElementById("loadBtn").addEventListener("click",loadLayout);
+  document.getElementById("clearBtn").addEventListener("click",clearAutoSave);
+  renderer.domElement.addEventListener("click",onMouseClick);
+  document.addEventListener("keydown",onKeyDown);
+  document.addEventListener("keyup",onKeyUp);
+  window.addEventListener("resize",onResize);
+
+  camera.position.set(0,240*S,RD/2-120*S);
+  yaw=0;updateRotation();animate();
+}
+
+function buildRoom(){
+  // Crystal materials — translucent, refractive-looking
+  const crystalClear=new THREE.MeshLambertMaterial({color:0x88aace,transparent:true,opacity:0.5,side:THREE.DoubleSide});
+  const crystalBlue=new THREE.MeshLambertMaterial({color:0x88ccff,emissive:0x2255aa,emissiveIntensity:0.9,transparent:true,opacity:0.85,side:THREE.DoubleSide});
+  const crystalPink=new THREE.MeshLambertMaterial({color:0xffaae0,emissive:0x882255,emissiveIntensity:0.9,transparent:true,opacity:0.85,side:THREE.DoubleSide});
+  const crystalGold=new THREE.MeshLambertMaterial({color:0xffe8a0,emissive:0x886622,emissiveIntensity:0.9,transparent:true,opacity:0.85,side:THREE.DoubleSide});
+  const crystalGreen=new THREE.MeshLambertMaterial({color:0xaaffcc,emissive:0x226644,emissiveIntensity:0.9,transparent:true,opacity:0.85,side:THREE.DoubleSide});
+  const crystalPurp=new THREE.MeshLambertMaterial({color:0xccaaff,emissive:0x552288,emissiveIntensity:0.9,transparent:true,opacity:0.85,side:THREE.DoubleSide});
+  const crystalSolid=new THREE.MeshLambertMaterial({color:0xaac8e8,emissive:0x0f2040,emissiveIntensity:0.22});
+  const crystalDark=new THREE.MeshLambertMaterial({color:0x0a1820});
+  const silverMat=new THREE.MeshLambertMaterial({color:0xc0c8d0,emissive:0x203040,emissiveIntensity:0.2});
+  const wallMat=new THREE.MeshLambertMaterial({color:0x0a1018,transparent:true,opacity:0.95});
+  const floorMat=new THREE.MeshLambertMaterial({color:0x080c10});
+
+  // Helper — crystal shard (elongated octahedron)
+  function makeShard(h,w,mat){
+    const g=new THREE.Group();
+    // Top pyramid
+    const top=new THREE.Mesh(new THREE.ConeGeometry(w,h*0.65,6),mat);
+    top.position.y=h*0.65/2;g.add(top);
+    // Bottom pyramid (shorter)
+    const bot=new THREE.Mesh(new THREE.ConeGeometry(w,h*0.35,6),mat);
+    bot.rotation.z=Math.PI;bot.position.y=-h*0.35/2;g.add(bot);
+    return g;
+  }
+
+  // ── Mirrored floor tiles ──
+  const tSz=60*S;const nX=Math.ceil(RW/tSz),nZ=Math.ceil(RD/tSz);
+  for(let ix=0;ix<nX;ix++)for(let iz=0;iz<nZ;iz++){
+    const col=(ix+iz)%2===0?0x0a1018:0x060c12;
+    const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-1,1.5*S,tSz-1),new THREE.MeshLambertMaterial({color:col,emissive:0x0a1828,emissiveIntensity:0.3}));
+    t.position.set(-RW/2+tSz*(ix+0.5),0.5*S,-RD/2+tSz*(iz+0.5));scene.add(t);
+  }
+
+  // ── Walls — dark with crystal inlays ──
+  const backWall=new THREE.Mesh(new THREE.BoxGeometry(RW,RH,14*S),wallMat);backWall.position.set(0,RH/2,-RD/2+7*S);scene.add(backWall);
+  const leftWall=new THREE.Mesh(new THREE.BoxGeometry(14*S,RH,RD),wallMat);leftWall.position.set(-RW/2+7*S,RH/2,0);scene.add(leftWall);
+  const rightWall=leftWall.clone();rightWall.position.x=RW/2-7*S;scene.add(rightWall);
+  const doorGapW=200*S;
+  const fSideW=(RW-doorGapW)/2;
+  const ffL=new THREE.Mesh(new THREE.BoxGeometry(fSideW,RH,14*S),wallMat);ffL.position.set(-(doorGapW/2+fSideW/2),RH/2,RD/2-7*S);scene.add(ffL);
+  const ffR=ffL.clone();ffR.position.x=doorGapW/2+fSideW/2;scene.add(ffR);
+  const lintel=new THREE.Mesh(new THREE.BoxGeometry(doorGapW,60*S,14*S),wallMat);lintel.position.set(0,RH-30*S,RD/2-7*S);scene.add(lintel);
+
+  // Wall crystal inlay panels
+  const inlayMats=[crystalBlue,crystalPink,crystalGold,crystalPurp,crystalGreen];
+  const glowBorderMat=new THREE.MeshLambertMaterial({color:0xaaddff,emissive:0x4488bb,emissiveIntensity:0.8});
+  [-1,1].forEach(s=>{
+    for(let i=0;i<4;i++){
+      const im=inlayMats[i%inlayMats.length];
+      const panel=new THREE.Mesh(new THREE.BoxGeometry(4*S,120*S,60*S),im);
+      panel.position.set(s*(RW/2-8*S),200*S,-RD/2+80*S+i*130*S);scene.add(panel);
+      // Glowing border frame
+      const bTop=new THREE.Mesh(new THREE.BoxGeometry(6*S,5*S,64*S),glowBorderMat);bTop.position.set(s*(RW/2-8*S),262*S,-RD/2+80*S+i*130*S);scene.add(bTop);
+      const bBot=new THREE.Mesh(new THREE.BoxGeometry(6*S,5*S,64*S),glowBorderMat);bBot.position.set(s*(RW/2-8*S),138*S,-RD/2+80*S+i*130*S);scene.add(bBot);
+      const bL=new THREE.Mesh(new THREE.BoxGeometry(6*S,130*S,5*S),glowBorderMat);bL.position.set(s*(RW/2-8*S),200*S,-RD/2+80*S+i*130*S-32*S);scene.add(bL);
+      const bR=new THREE.Mesh(new THREE.BoxGeometry(6*S,130*S,5*S),glowBorderMat);bR.position.set(s*(RW/2-8*S),200*S,-RD/2+80*S+i*130*S+32*S);scene.add(bR);
+    }
+  });
+  // Back wall crystal panels
+  for(let i=0;i<5;i++){
+    const im=inlayMats[i%inlayMats.length];
+    const panel=new THREE.Mesh(new THREE.BoxGeometry(80*S,130*S,4*S),im);
+    panel.position.set(-RW/2+90*S+i*130*S,220*S,-RD/2+8*S);scene.add(panel);
+    const bTop=new THREE.Mesh(new THREE.BoxGeometry(84*S,5*S,6*S),glowBorderMat);bTop.position.set(-RW/2+90*S+i*130*S,287*S,-RD/2+8*S);scene.add(bTop);
+    const bBot=new THREE.Mesh(new THREE.BoxGeometry(84*S,5*S,6*S),glowBorderMat);bBot.position.set(-RW/2+90*S+i*130*S,153*S,-RD/2+8*S);scene.add(bBot);
+    const bL=new THREE.Mesh(new THREE.BoxGeometry(5*S,140*S,6*S),glowBorderMat);bL.position.set(-RW/2+90*S+i*130*S-42*S,220*S,-RD/2+8*S);scene.add(bL);
+    const bR=new THREE.Mesh(new THREE.BoxGeometry(5*S,140*S,6*S),glowBorderMat);bR.position.set(-RW/2+90*S+i*130*S+42*S,220*S,-RD/2+8*S);scene.add(bR);
+  }
+
+  // ── Ceiling — crystal faceted panels ──
+  const ceilBase=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),new THREE.MeshLambertMaterial({color:0x060810}));
+  ceilBase.rotation.x=Math.PI/2;ceilBase.position.y=RH;scene.add(ceilBase);
+  // Ceiling crystal tiles
+  const ctSz=120*S;
+  for(let ix=0;ix<Math.ceil(RW/ctSz);ix++)for(let iz=0;iz<Math.ceil(RD/ctSz);iz++){
+    const cm=inlayMats[(ix+iz)%inlayMats.length];
+    const ct=new THREE.Mesh(new THREE.PlaneGeometry(ctSz-4,ctSz-4),cm);
+    ct.rotation.x=Math.PI/2;ct.position.set(-RW/2+ctSz*(ix+0.5),RH-1*S,-RD/2+ctSz*(iz+0.5));scene.add(ct);
+  }
+
+  // ── GRAND CRYSTAL CHANDELIER ──
+  const chandG=new THREE.Group();
+  // Main chain
+  const chain=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,80*S,8),silverMat);chain.position.y=0;chandG.add(chain);
+  // Central crystal ball
+  const centBall=new THREE.Mesh(new THREE.SphereGeometry(28*S,16,16),crystalClear);centBall.position.y=-48*S;chandG.add(centBall);
+  const centBallInner=new THREE.Mesh(new THREE.SphereGeometry(20*S,16,16),new THREE.MeshLambertMaterial({color:0xffffff,emissive:0x224466,emissiveIntensity:0.5}));
+  centBallInner.position.y=-48*S;chandG.add(centBallInner);
+  // 3 tiers of crystal drops
+  [[80*S,12,60*S],[55*S,10,44*S],[30*S,8,28*S]].forEach(([r,count,dropY],ti)=>{
+    const ringMesh=new THREE.Mesh(new THREE.TorusGeometry(r,2*S,6,count),silverMat);
+    ringMesh.rotation.x=Math.PI/2;ringMesh.position.y=-48*S-ti*20*S;chandG.add(ringMesh);
+    for(let i=0;i<count;i++){
+      const a=i*Math.PI*2/count;
+      const dropMat=inlayMats[(i+ti)%inlayMats.length];
+      const drop=makeShard(20*S+ti*6*S,5*S,dropMat);
+      drop.position.set(Math.cos(a)*r,-48*S-ti*20*S-14*S,Math.sin(a)*r);
+      chandG.add(drop);
+      // Emissive core
+      const core=new THREE.Mesh(new THREE.SphereGeometry(3*S,6,6),new THREE.MeshLambertMaterial({color:0xffffff,emissive:0x224466,emissiveIntensity:0.5}));
+      core.position.set(Math.cos(a)*r,-48*S-ti*20*S-8*S,Math.sin(a)*r);chandG.add(core);
+    }
+  });
+  chandG.position.set(0,RH-3*S,0);scene.add(chandG);
+
+  // ── Entrance — crystal-framed double doors ──
+  const dW=95*S,dH=RH*0.88,dThick=8*S;
+  const doorZ=RD/2-6*S;
+  const doorMat=new THREE.MeshLambertMaterial({color:0x0a1820,transparent:true,opacity:0.85});
+  const frameGlow=new THREE.MeshLambertMaterial({color:0xaaddff,emissive:0x1a3355,emissiveIntensity:0.35});
+  [-1,1].forEach(s=>{
+    const fr=new THREE.Mesh(new THREE.BoxGeometry(16*S,dH+16*S,dThick+4*S),frameGlow);fr.position.set(s*(dW+8*S),dH/2,doorZ);scene.add(fr);
+    const door=new THREE.Mesh(new THREE.BoxGeometry(dW,dH,dThick),doorMat);door.position.set(s*dW/2,dH/2,doorZ);scene.add(door);
+    // Crystal panel insets on doors
+    [dH*0.2,dH*0.5,dH*0.78].forEach((py,pi)=>{
+      const pm=inlayMats[pi%inlayMats.length];
+      const pnl=new THREE.Mesh(new THREE.BoxGeometry(dW-20*S,dH*0.18,5*S),pm);
+      pnl.position.set(s*dW/2,py,doorZ+4*S);scene.add(pnl);
+    });
+    // Crystal handle
+    const hdl=new THREE.Mesh(new THREE.CylinderGeometry(3*S,3*S,18*S,8),crystalClear);
+    hdl.rotation.z=Math.PI/2;hdl.position.set(s*(dW-14*S),dH*0.46,doorZ+5*S);scene.add(hdl);
+  });
+  const topFrame=new THREE.Mesh(new THREE.BoxGeometry(dW*2+32*S+8*S,16*S,dThick+4*S),frameGlow);
+  topFrame.position.set(0,dH+8*S,doorZ);scene.add(topFrame);
+  const divStrip=new THREE.Mesh(new THREE.BoxGeometry(6*S,dH,dThick+2*S),frameGlow);divStrip.position.set(0,dH/2,doorZ);scene.add(divStrip);
+
+  // ── BED — crystal four-poster ──
+  const bedG=new THREE.Group();
+  const bedW=300*S,bedL=410*S,bedH=65*S,mattH=26*S;
+  const bedBase=new THREE.Mesh(new THREE.BoxGeometry(bedW+16*S,bedH,bedL+16*S),crystalSolid);bedBase.position.set(0,bedH/2,0);bedG.add(bedBase);
+  const matt=new THREE.Mesh(new THREE.BoxGeometry(bedW,mattH,bedL),new THREE.MeshLambertMaterial({color:0xeef8ff}));matt.position.set(0,bedH+mattH/2,0);bedG.add(matt);
+  // Shimmering crystal coverlet
+  const cover=new THREE.Mesh(new THREE.BoxGeometry(bedW-4*S,mattH*0.5,bedL*0.72),crystalBlue);cover.position.set(0,bedH+mattH+mattH*0.25,bedL*0.1);bedG.add(cover);
+  [-1,1].forEach(s=>{const p=new THREE.Mesh(new THREE.BoxGeometry(118*S,16*S,66*S),crystalClear);p.position.set(s*78*S,bedH+mattH+16*S,-bedL/2+44*S);bedG.add(p);});
+  // Crystal posts
+  const postH=RH*0.82;
+  [[-bedW/2,-bedL/2],[bedW/2,-bedL/2],[-bedW/2,bedL/2],[bedW/2,bedL/2]].forEach(([px,pz])=>{
+    const post=new THREE.Mesh(new THREE.CylinderGeometry(10*S,12*S,postH,8),crystalSolid);post.position.set(px,postH/2,pz);bedG.add(post);
+    // Crystal rings on posts
+    [postH*0.25,postH*0.5,postH*0.75].forEach(py=>{
+      const ring=new THREE.Mesh(new THREE.TorusGeometry(14*S,3*S,6,12),crystalBlue);ring.rotation.x=Math.PI/2;ring.position.set(px,py,pz);bedG.add(ring);
+    });
+    const finial=makeShard(30*S,8*S,crystalClear);finial.position.set(px,postH+15*S,pz);bedG.add(finial);
+  });
+  // Headboard — crystal slab
+  const hb=new THREE.Mesh(new THREE.BoxGeometry(bedW+10*S,180*S,14*S),crystalBlue);hb.position.set(0,bedH+90*S,-bedL/2-4*S);bedG.add(hb);
+  const hbInner=new THREE.Mesh(new THREE.BoxGeometry(bedW-20*S,150*S,8*S),crystalClear);hbInner.position.set(0,bedH+90*S,-bedL/2+4*S);bedG.add(hbInner);
+  // Canopy — crystal mesh
+  const canopyTop=new THREE.Mesh(new THREE.BoxGeometry(bedW+28*S,10*S,bedL+28*S),crystalSolid);canopyTop.position.set(0,postH+5*S,0);bedG.add(canopyTop);
+  const drapeMat=new THREE.MeshLambertMaterial({color:0xaaddff,transparent:true,opacity:0.25,side:THREE.DoubleSide});
+  [[-bedW/2-2*S,0,Math.PI/2],[bedW/2+2*S,0,-Math.PI/2],[0,-bedL/2-2*S,0],[0,bedL/2+2*S,Math.PI]].forEach(([dx,dz,ry])=>{
+    const drapeW=dx!==0?bedL:bedW;
+    const drape=new THREE.Mesh(new THREE.PlaneGeometry(drapeW,postH),drapeMat);drape.rotation.y=ry;drape.position.set(dx,postH/2,dz);bedG.add(drape);
+  });
+  bedG.position.set(0,0,-RD/2+bedL/2+30*S);
+  addGroup(bedG,"crystal_bed");
+
+  // ── Bedside tables — crystal pedestals ──
+  [-1,1].forEach((s,i)=>{
+    const bG=new THREE.Group();
+    const bTop=new THREE.Mesh(new THREE.CylinderGeometry(38*S,38*S,6*S,8),crystalSolid);bTop.position.set(0,78*S,0);bG.add(bTop);
+    const bStem=new THREE.Mesh(new THREE.CylinderGeometry(12*S,20*S,70*S,8),crystalBlue);bStem.position.set(0,38*S,0);bG.add(bStem);
+    const bBase=new THREE.Mesh(new THREE.CylinderGeometry(30*S,30*S,8*S,8),crystalSolid);bBase.position.set(0,4*S,0);bG.add(bBase);
+    // Crystal lamp
+    const lShard=makeShard(50*S,10*S,crystalGold);lShard.position.set(0,110*S,0);bG.add(lShard);
+    const lCore=new THREE.Mesh(new THREE.SphereGeometry(6*S,8,8),new THREE.MeshLambertMaterial({color:0xfff8d0,emissive:0xffcc66,emissiveIntensity:1}));lCore.position.set(0,112*S,0);bG.add(lCore);
+    bG.position.set(s*(300*S/2+46*S),0,-RD/2+90*S);
+    addGroup(bG,"bedside_"+(i===0?"left":"right"));
+  });
+
+  // ── Crystal display cabinet — left wall ──
+  const cabG=new THREE.Group();
+  const cabW=220*S,cabH=380*S,cabD=50*S;
+  const cabBody=new THREE.Mesh(new THREE.BoxGeometry(cabW,cabH,cabD),crystalSolid);cabBody.position.set(0,cabH/2,0);cabG.add(cabBody);
+  const cabTop=new THREE.Mesh(new THREE.BoxGeometry(cabW+10*S,14*S,cabD+6*S),crystalSolid);cabTop.position.set(0,cabH+7*S,0);cabG.add(cabTop);
+  // Glass fronts
+  [-1,1].forEach(s=>{
+    const glass=new THREE.Mesh(new THREE.BoxGeometry(cabW/2-6*S,cabH-20*S,3*S),crystalClear);
+    glass.position.set(s*cabW/4,cabH/2,cabD/2+1.5*S);cabG.add(glass);
+  });
+  // Crystal trinkets on shelves
+  const shelfMats=[crystalPink,crystalBlue,crystalGold,crystalPurp,crystalGreen];
+  [cabH*0.2,cabH*0.42,cabH*0.64,cabH*0.84].forEach((sy,si)=>{
+    const shelf=new THREE.Mesh(new THREE.BoxGeometry(cabW-10*S,4*S,cabD-8*S),crystalSolid);shelf.position.set(0,sy,0);cabG.add(shelf);
+    [-60*S,-20*S,20*S,60*S].forEach((tx,ti)=>{
+      const sm=shelfMats[(si+ti)%shelfMats.length];
+      const shard=makeShard(16*S+ti*4*S,5*S,sm);shard.position.set(tx,sy+12*S,0);cabG.add(shard);
+    });
+  });
+  cabG.position.set(-RW/2+cabD/2+10*S,0,RD/6);
+  addGroup(cabG,"crystal_cabinet");
+
+  // ── Crystal dressing table — right wall ──
+  const dtG=new THREE.Group();
+  const dtW=180*S,dtH=88*S,dtD=55*S;
+  const dtBody=new THREE.Mesh(new THREE.BoxGeometry(dtW,dtH,dtD),crystalSolid);dtBody.position.set(0,dtH/2,0);dtG.add(dtBody);
+  const dtTop=new THREE.Mesh(new THREE.BoxGeometry(dtW+8*S,6*S,dtD+8*S),crystalBlue);dtTop.position.set(0,dtH+3*S,0);dtG.add(dtTop);
+  // Crystal mirror
+  const dtMirFrame=new THREE.Mesh(new THREE.BoxGeometry(dtW-10*S,150*S,8*S),crystalSolid);dtMirFrame.position.set(0,dtH+85*S,0);dtG.add(dtMirFrame);
+  const dtMir=new THREE.Mesh(new THREE.BoxGeometry(dtW-26*S,134*S,4*S),new THREE.MeshLambertMaterial({color:0xccf0ff,emissive:0x224466,emissiveIntensity:0.4}));dtMir.position.set(0,dtH+85*S,3*S);dtG.add(dtMir);
+  // Crystal perfume bottles / trinkets
+  [-50*S,0,50*S].forEach((bx,i)=>{
+    const bm=shelfMats[i%shelfMats.length];
+    const bottle=makeShard(22*S,6*S,bm);bottle.position.set(bx,dtH+16*S,0);dtG.add(bottle);
+    const bCore=new THREE.Mesh(new THREE.SphereGeometry(3*S,6,6),new THREE.MeshLambertMaterial({color:0xffffff,emissive:0xaaddff,emissiveIntensity:0.8}));bCore.position.set(bx,dtH+16*S,0);dtG.add(bCore);
+  });
+  // Crystal stool
+  const stool=new THREE.Mesh(new THREE.CylinderGeometry(24*S,24*S,8*S,8),crystalPink);stool.position.set(0,50*S,dtD/2+32*S);dtG.add(stool);
+  const stoolStem=new THREE.Mesh(new THREE.CylinderGeometry(5*S,7*S,42*S,8),crystalSolid);stoolStem.position.set(0,26*S,dtD/2+32*S);dtG.add(stoolStem);
+  dtG.position.set(RW/2-dtD/2-10*S,0,-RD/6);dtG.rotation.y=-Math.PI/2;
+  addGroup(dtG,"dressing_table");
+
+  // ── Crystal trinket table — centre ──
+  const tabG=new THREE.Group();
+  const tabTop2=new THREE.Mesh(new THREE.CylinderGeometry(55*S,55*S,6*S,8),crystalSolid);tabTop2.position.set(0,80*S,0);tabG.add(tabTop2);
+  const tabStem=new THREE.Mesh(new THREE.CylinderGeometry(8*S,14*S,70*S,8),crystalBlue);tabStem.position.set(0,42*S,0);tabG.add(tabStem);
+  const tabBase=new THREE.Mesh(new THREE.CylinderGeometry(32*S,32*S,7*S,8),crystalSolid);tabBase.position.set(0,3.5*S,0);tabG.add(tabBase);
+  // Crystal centrepiece — cluster of shards
+  const cMats=[crystalPink,crystalBlue,crystalGold,crystalPurp,crystalGreen,crystalClear];
+  for(let i=0;i<8;i++){
+    const a=i*Math.PI/4;const r=18*S;const h=30*S+Math.random()*20*S;
+    const sh=makeShard(h,6*S,cMats[i%cMats.length]);
+    sh.position.set(Math.cos(a)*r,86*S+h/2,Math.sin(a)*r);
+    sh.rotation.z=(Math.random()-0.5)*0.4;
+    tabG.add(sh);
+  }
+  // Centre large shard
+  const centreShard=makeShard(50*S,12*S,crystalClear);centreShard.position.set(0,110*S,0);tabG.add(centreShard);
+  const centreCore=new THREE.Mesh(new THREE.SphereGeometry(6*S,8,8),new THREE.MeshLambertMaterial({color:0xffffff,emissive:0x224466,emissiveIntensity:0.5}));centreCore.position.set(0,112*S,0);tabG.add(centreCore);
+  tabG.position.set(0,0,RD/5);
+  addGroup(tabG,"crystal_table");
+
+  // ── Wall crystal sconces ──
+  [-1,1].forEach(s=>{
+    [-RD/3,0,RD/3].forEach((wz,wi)=>{
+      const scG=new THREE.Group();
+      const scArm=new THREE.Mesh(new THREE.BoxGeometry(4*S,4*S,30*S),silverMat);scArm.position.set(0,0,15*S);scG.add(scArm);
+      const scBowl=new THREE.Mesh(new THREE.SphereGeometry(10*S,8,8),crystalClear);scBowl.position.set(0,0,30*S);scG.add(scBowl);
+      const scCore=new THREE.Mesh(new THREE.SphereGeometry(5*S,6,6),new THREE.MeshLambertMaterial({color:0xffffff,emissive:0x1a3355,emissiveIntensity:0.5}));scCore.position.set(0,0,30*S);scG.add(scCore);
+      // Hanging drops
+      for(let d=0;d<3;d++){
+        const da=(d-1)*0.4;const dm=cMats[(wi+d)%cMats.length];
+        const drop=makeShard(14*S,4*S,dm);drop.position.set(Math.sin(da)*8*S,-14*S,30*S+Math.cos(da)*4*S);scG.add(drop);
+      }
+      scG.position.set(s*(RW/2-8*S),280*S,wz);scG.rotation.y=s>0?-Math.PI/2:Math.PI/2;
+      scene.add(scG);
+    });
+  });
+
+  // ── Large floor crystal clusters — corners ──
+  [[-RW/2+80*S,-RD/2+80*S],[RW/2-80*S,-RD/2+80*S],[-RW/2+80*S,RD/2-200*S],[RW/2-80*S,RD/2-200*S]].forEach(([cx,cz],ci)=>{
+    const clG=new THREE.Group();
+    for(let i=0;i<6;i++){
+      const a=i*Math.PI/3;const r=20*S;const h=40*S+i*12*S;
+      const cm=cMats[i%cMats.length];
+      const sh=makeShard(h,9*S,cm);
+      sh.position.set(Math.cos(a)*r,h/2,Math.sin(a)*r);sh.rotation.z=(Math.random()-0.5)*0.3;clG.add(sh);
+      const core=new THREE.Mesh(new THREE.SphereGeometry(3*S,6,6),new THREE.MeshLambertMaterial({color:0xffffff,emissive:0x88ccff,emissiveIntensity:0.8}));core.position.set(Math.cos(a)*r,h/2,Math.sin(a)*r);clG.add(core);
+    }
+    clG.position.set(cx,0,cz);
+    addGroup(clG,"floor_cluster_"+ci);
+  });
+
+  // ── Crystal-framed paintings ──
+  function makeCrystalPainting(pw,ph,drawFn,id){
+    const g=new THREE.Group();
+    // Outer crystal frame
+    const frameMat=new THREE.MeshLambertMaterial({color:0xaaccee,emissive:0x1a3355,emissiveIntensity:0.3,transparent:true,opacity:0.85});
+    const frame=new THREE.Mesh(new THREE.BoxGeometry(pw+22*S,ph+22*S,10*S),frameMat);g.add(frame);
+    // Inner shard trim — crystal spikes around frame edge
+    const trimMats=[crystalBlue,crystalPink,crystalPurp,crystalGreen,crystalGold];
+    const numH=Math.floor(pw/(18*S)),numV=Math.floor(ph/(18*S));
+    [-1,1].forEach(ys=>{for(let i=0;i<numH;i++){const sh=makeShard(12*S,4*S,trimMats[i%trimMats.length]);sh.position.set(-pw/2+pw*i/numH+pw/(numH*2),ys*(ph/2+11*S),6*S);sh.rotation.z=ys*Math.PI/2;g.add(sh);}});
+    [-1,1].forEach(xs=>{for(let i=0;i<numV;i++){const sh=makeShard(12*S,4*S,trimMats[i%trimMats.length]);sh.position.set(xs*(pw/2+11*S),-ph/2+ph*i/numV+ph/(numV*2),6*S);sh.rotation.z=xs>0?0:Math.PI;g.add(sh);}});
+    // Corner crystal clusters
+    [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([cx,cy],ci)=>{const sh=makeShard(18*S,6*S,trimMats[ci%trimMats.length]);sh.position.set(cx*(pw/2+11*S),cy*(ph/2+11*S),8*S);g.add(sh);});
+    // Canvas
+    const c=document.createElement('canvas');c.width=512;c.height=Math.round(512*ph/pw);
+    drawFn(c.getContext('2d'),c.width,c.height);
+    const tex=new THREE.CanvasTexture(c);tex.encoding=THREE.sRGBEncoding;
+    const surf=new THREE.Mesh(new THREE.PlaneGeometry(pw,ph),new THREE.MeshLambertMaterial({map:tex,side:THREE.DoubleSide}));surf.position.z=6*S;g.add(surf);
+    addGroup(g,id);return g;
+  }
+
+  function drawIcescape(ctx,w,h){
+    // Frozen lake scene
+    const sky=ctx.createLinearGradient(0,0,0,h*0.6);sky.addColorStop(0,'#0a1828');sky.addColorStop(1,'#1a3a5a');
+    ctx.fillStyle=sky;ctx.fillRect(0,0,w,h*0.62);
+    // Aurora
+    ctx.globalAlpha=0.4;
+    const aur=ctx.createLinearGradient(0,0,w,0);aur.addColorStop(0,'#00ccff');aur.addColorStop(0.5,'#cc88ff');aur.addColorStop(1,'#00ffcc');
+    ctx.fillStyle=aur;ctx.fillRect(0,h*0.1,w,h*0.2);
+    ctx.globalAlpha=1;
+    // Ice mountains
+    ctx.fillStyle='#c8dff0';
+    ctx.beginPath();ctx.moveTo(0,h*0.62);ctx.lineTo(w*0.15,h*0.22);ctx.lineTo(w*0.3,h*0.45);ctx.lineTo(w*0.5,h*0.15);ctx.lineTo(w*0.7,h*0.38);ctx.lineTo(w*0.85,h*0.2);ctx.lineTo(w,h*0.42);ctx.lineTo(w,h*0.62);ctx.closePath();ctx.fill();
+    ctx.fillStyle='#e8f4ff';ctx.globalAlpha=0.5;
+    ctx.beginPath();ctx.moveTo(w*0.48,h*0.15);ctx.lineTo(w*0.52,h*0.15);ctx.lineTo(w*0.65,h*0.38);ctx.lineTo(w*0.35,h*0.38);ctx.closePath();ctx.fill();ctx.globalAlpha=1;
+    // Frozen lake
+    ctx.fillStyle='#1a3a5a';ctx.fillRect(0,h*0.62,w,h*0.38);
+    ctx.fillStyle='#6699cc';ctx.globalAlpha=0.3;ctx.fillRect(0,h*0.62,w,h*0.05);ctx.globalAlpha=1;
+    // Ice reflections
+    ctx.strokeStyle='#aaccee';ctx.lineWidth=1;ctx.globalAlpha=0.4;
+    for(let i=0;i<5;i++){ctx.beginPath();ctx.moveTo(0,h*0.68+i*12);ctx.lineTo(w,h*0.68+i*12);ctx.stroke();}
+    ctx.globalAlpha=1;
+    // Crystals on ice
+    for(let i=0;i<6;i++){ctx.fillStyle='#c8e8ff';ctx.globalAlpha=0.8;ctx.beginPath();const cx2=w*0.1+i*w*0.14,cy2=h*0.66;ctx.moveTo(cx2,cy2-16);ctx.lineTo(cx2+5,cy2);ctx.lineTo(cx2,cy2+8);ctx.lineTo(cx2-5,cy2);ctx.closePath();ctx.fill();}ctx.globalAlpha=1;
+  }
+
+  function drawCrystalStillLife(ctx,w,h){
+    ctx.fillStyle='#060c14';ctx.fillRect(0,0,w,h);
+    // Table surface
+    ctx.fillStyle='#0a1820';ctx.fillRect(0,h*0.7,w,h*0.3);
+    ctx.fillStyle='#1a3a5a';ctx.fillRect(0,h*0.68,w,h*0.04);
+    // Large crystal vase
+    ctx.fillStyle='#4488aa';ctx.globalAlpha=0.7;
+    ctx.beginPath();ctx.ellipse(w*0.35,h*0.62,w*0.1,h*0.2,0,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#aaddff';ctx.globalAlpha=0.4;
+    ctx.beginPath();ctx.ellipse(w*0.32,h*0.55,w*0.03,h*0.08,0,0,Math.PI*2);ctx.fill();
+    ctx.globalAlpha=1;
+    // Flowers — crystal blooms
+    [[w*0.25,h*0.32],[w*0.35,h*0.25],[w*0.45,h*0.3]].forEach(([fx,fy],fi)=>{
+      const cols=['#ccaaff','#aaddff','#ffccee'];
+      ctx.fillStyle=cols[fi];ctx.globalAlpha=0.85;
+      for(let p=0;p<6;p++){const pa=p*Math.PI/3;ctx.beginPath();ctx.ellipse(fx+Math.cos(pa)*14,fy+Math.sin(pa)*14,8,12,pa,0,Math.PI*2);ctx.fill();}
+      ctx.fillStyle='#ffffff';ctx.globalAlpha=0.9;ctx.beginPath();ctx.arc(fx,fy,6,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+    });
+    // Small crystal trinkets on table
+    [[w*0.6,h*0.65,0x4488bb,'#88bbdd'],[w*0.72,h*0.63,0x884488,'#cc88ff'],[w*0.8,h*0.66,0x448844,'#88ddaa']].forEach(([tx,ty,_,col])=>{
+      ctx.fillStyle=col;ctx.globalAlpha=0.8;
+      ctx.beginPath();ctx.moveTo(tx,ty-20);ctx.lineTo(tx+8,ty);ctx.lineTo(tx,ty+10);ctx.lineTo(tx-8,ty);ctx.closePath();ctx.fill();ctx.globalAlpha=1;
+    });
+  }
+
+  function drawCrystalAbstract(ctx,w,h){
+    ctx.fillStyle='#04080e';ctx.fillRect(0,0,w,h);
+    // Radiating crystal light beams
+    const cx3=w/2,cy3=h/2;
+    const beamCols=['#224488','#334499','#446699','#2255aa','#335588'];
+    for(let i=0;i<16;i++){
+      const a=i*Math.PI/8;
+      ctx.strokeStyle=beamCols[i%beamCols.length];ctx.lineWidth=2+i%3;ctx.globalAlpha=0.3;
+      ctx.beginPath();ctx.moveTo(cx3,cy3);ctx.lineTo(cx3+Math.cos(a)*w,cy3+Math.sin(a)*h);ctx.stroke();
+    }
+    ctx.globalAlpha=1;
+    // Crystal facets
+    const facetCols=[['#1a3a6a','#2255aa'],['#2a1a5a','#6644aa'],['#0a3a4a','#2288aa'],['#1a4a2a','#44aa88']];
+    for(let i=0;i<12;i++){
+      const a=i*Math.PI/6;const r=80+i*15;const fc=facetCols[i%facetCols.length];
+      ctx.fillStyle=fc[0];ctx.globalAlpha=0.6;
+      ctx.beginPath();ctx.moveTo(cx3,cy3);ctx.lineTo(cx3+Math.cos(a)*r,cy3+Math.sin(a)*r);ctx.lineTo(cx3+Math.cos(a+0.4)*r*0.8,cy3+Math.sin(a+0.4)*r*0.8);ctx.closePath();ctx.fill();
+      ctx.fillStyle=fc[1];ctx.globalAlpha=0.35;
+      ctx.beginPath();ctx.arc(cx3+Math.cos(a)*r*0.6,cy3+Math.sin(a)*r*0.6,12,0,Math.PI*2);ctx.fill();
+    }
+    ctx.globalAlpha=1;
+    // Central glowing orb
+    const grad=ctx.createRadialGradient(cx3,cy3,0,cx3,cy3,50);grad.addColorStop(0,'#ffffff');grad.addColorStop(0.3,'#aaddff');grad.addColorStop(1,'transparent');
+    ctx.fillStyle=grad;ctx.beginPath();ctx.arc(cx3,cy3,50,0,Math.PI*2);ctx.fill();
+  }
+
+  // Place paintings on back wall and side walls
+  const pic1=makeCrystalPainting(130*S,100*S,drawIcescape,"painting_icescape");
+  pic1.position.set(-200*S,310*S,-RD/2+12*S);
+  const pic2=makeCrystalPainting(110*S,130*S,drawCrystalStillLife,"painting_stilllife");
+  pic2.position.set(200*S,310*S,-RD/2+12*S);
+  const pic3=makeCrystalPainting(120*S,120*S,drawCrystalAbstract,"painting_abstract");
+  pic3.rotation.y=Math.PI/2;pic3.position.set(-RW/2+12*S,300*S,0);
+  const pic4=makeCrystalPainting(120*S,100*S,drawIcescape,"painting_icescape2");
+  pic4.rotation.y=-Math.PI/2;pic4.position.set(RW/2-12*S,300*S,-RD/6);
+  [-1,1].forEach(s=>{
+    const curtG=new THREE.Group();
+    for(let i=0;i<5;i++){
+      const cm=cMats[i%cMats.length];
+      const strand=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,RH*0.7,4),cm);
+      strand.position.set(i*14*S,RH*0.15,0);curtG.add(strand);
+      // Drops along strand
+      for(let d=0;d<4;d++){
+        const drop=makeShard(12*S,4*S,cm);drop.position.set(i*14*S,RH*0.7*d/4,0);curtG.add(drop);
+      }
+    }
+    curtG.position.set(s*(doorGapW/2+30*S),RH*0.15,RD/2-7*S);
+    addGroup(curtG,"crystal_curtain_"+(s<0?"left":"right"));
+  });
+}
+
+function onResize(){camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);}
+function updateRotation(){camera.rotation.order="YXZ";camera.rotation.set(0,yaw,0);}
+
+const exitCooldown=(new URLSearchParams(window.location.search).get("from")==="floor2")?Date.now()+4000:0;
+let exitTriggered=false,nearExit=false;
+function checkExitDoor(){
+  if(!exitTriggered&&Date.now()>exitCooldown){
+    nearExit=Math.abs(camera.position.x)<200*S&&camera.position.z>RD/2-200*S;
+    document.getElementById("doorHint").style.display=nearExit?"block":"none";
+  }
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();const delta=(now-prevTime)/1000;prevTime=now;
+  if(!EDIT_MODE){
+    if(turnLeft)yaw+=2.2*delta;if(turnRight)yaw-=2.2*delta;
+    const mv=Number(moveForward)-Number(moveBackward);
+    if(mv!==0&&window.SoundSystem)SoundSystem.footstep();
+    const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+    camera.position.x+=fwd.x*mv*120*delta;
+    camera.position.z+=fwd.z*mv*120*delta;
+    camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2-20*S,camera.position.x));
+    camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-15*S,camera.position.z));
+    camera.position.y=240*S;
+  }
+  // Crystal shimmer
+  if(window._crystalLights){
+    const t=now*0.001;
+    window._crystalLights.forEach((l,i)=>{l.intensity=(1.2+Math.sin(t*2.1+i*1.3)*0.4+Math.sin(t*3.7+i*0.9)*0.2);});
+  }
+  checkExitDoor();updateRotation();renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+// engine scripts loaded below
+</script>
+<script src="../floor1/sound-system.js"></script>
+<script src="../floor1/mystery-engine.js"></script>
+<script src="../floor1/mystery-state.js"></script>
+<script src="../floor1/mystery-ui.js"></script>
+<script src="../floor1/evidence-system.js"></script>
+<script>
+(async()=>{
+  await MysteryEngine.init();
+  let scenario=await MysteryState.load();
+  if(!scenario){scenario=MysteryEngine.generate();await MysteryState.save(scenario);}
+  window._scenario=scenario;
+  MysteryUI.init(scenario,false);
+  MysteryUI.setZone('crystal_room');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'crystalroom' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

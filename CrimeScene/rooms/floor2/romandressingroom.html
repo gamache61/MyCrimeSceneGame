@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Roman Dressing Chamber</title>
+<style>
+#exitFade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9999;transition:opacity 0.6s ease;}
+#exitFade.show{opacity:1;}
+#instructionLine{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:8px 16px;font-size:14px;color:#eee;background:rgba(0,0,0,0.6);border-radius:6px;z-index:30;pointer-events:none;white-space:nowrap;}
+body{margin:0;overflow:hidden;background:#000;font-family:Arial,sans-serif;}
+canvas{display:block;}
+#fadeOverlay{position:fixed;inset:0;background:#000;z-index:9999;animation:fadeOut 0.8s ease forwards;}
+@keyframes fadeOut{from{opacity:1;}to{opacity:0;}}
+#editHud{position:fixed;top:58px;left:50%;transform:translateX(-50%);z-index:60;display:flex;gap:8px;align-items:center;}
+#editBtn,#saveBtn,#loadBtn,#clearBtn{padding:8px 12px;border-radius:10px;border:1px solid rgba(255,255,255,0.25);background:rgba(0,0,0,0.72);color:#eee;cursor:pointer;}
+#editIndicator{padding:6px 10px;border-radius:999px;font-size:12px;border:1px solid rgba(255,255,255,0.20);background:rgba(80,20,20,0.8);color:#ffd0d0;}
+#editIndicator.on{background:rgba(20,80,20,0.85);color:#d5ffd5;}
+#autoStatus{position:fixed;top:108px;left:50%;transform:translateX(-50%);padding:8px 12px;border-radius:10px;background:rgba(0,0,0,0.65);color:#d7f7d7;font:12px/1.35 system-ui;display:none;z-index:70;pointer-events:none;}
+#selInfo{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:8px 18px;background:rgba(0,0,0,0.8);color:#aaddff;border-radius:8px;font-size:13px;display:none;z-index:60;pointer-events:none;}
+#debugHud{position:fixed;left:10px;bottom:10px;color:#9ff;font:12px monospace;background:rgba(0,0,0,0.7);padding:8px;border-radius:6px;display:none;z-index:100;pointer-events:none;}
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit &nbsp; M = Edit Mode &nbsp; G = Grid</div>
+<div id="doorHint" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#d4a840;border-radius:4px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(200,140,40,0.5);">Press E — Return to Imperial Chamber</div>
+<div id="fadeOverlay"></div>
+<div id="editHud">
+  <button id="editBtn" type="button">Edit Mode</button>
+  <button id="saveBtn" type="button">Save Layout</button>
+  <button id="loadBtn" type="button">Load Layout</button>
+  <button id="clearBtn" type="button">Clear Save</button>
+  <div id="editIndicator">OFF</div>
+</div>
+<div id="autoStatus"></div>
+<div id="selInfo"></div>
+<div id="debugHud"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+const STORAGE_KEY="roman_dressing_chamber_layout";
+const S=0.5;
+// Smaller room than suite
+const RW=1000*S, RD=1200*S, RH=600*S;
+let scene,camera,renderer,yaw=0,prevTime=performance.now();
+let moveForward=false,moveBackward=false,turnLeft=false,turnRight=false;
+let EDIT_MODE=false,selectedObject=null;
+const editableObjects=[];
+const raycaster=new THREE.Raycaster();
+const mouse=new THREE.Vector2();
+let _ec=0;
+let DEBUG_ON=false,debugGroup=null,positionDisplayInterval=null;
+let nearExit=false,exitTriggered=false;
+
+function addGroup(g,id){g.userData.editId=id||("grp_"+(++_ec));editableObjects.push(g);scene.add(g);return g;}
+function showStatus(msg,ok=true){const el=document.getElementById("autoStatus");el.style.display="block";el.style.color=ok?"#d7f7d7":"#ffd7d7";el.textContent=msg;setTimeout(()=>{el.style.display="none";},2200);}
+function updateEditUI(){const ind=document.getElementById("editIndicator");ind.textContent=EDIT_MODE?"ON":"OFF";ind.classList.toggle("on",EDIT_MODE);const btn=document.getElementById("editBtn");btn.textContent=EDIT_MODE?"✏️ Edit Mode: ON":"Edit Mode: OFF";btn.style.background=EDIT_MODE?"rgba(20,80,20,0.85)":"rgba(0,0,0,0.72)";}
+function toggleEditMode(){EDIT_MODE=!EDIT_MODE;if(!EDIT_MODE){selectedObject=null;document.getElementById("selInfo").style.display="none";}updateEditUI();}
+function saveLayout(){const objects=editableObjects.map(o=>{const wp=new THREE.Vector3();o.getWorldPosition(wp);const wq=new THREE.Quaternion();o.getWorldQuaternion(wq);return{id:o.userData.editId,position:{x:wp.x,y:wp.y,z:wp.z},quaternion:{x:wq.x,y:wq.y,z:wq.z,w:wq.w},scale:{x:o.scale.x,y:o.scale.y,z:o.scale.z}};});localStorage.setItem(STORAGE_KEY,JSON.stringify({version:1,objects}));showStatus("✅ Saved");}
+function loadLayout(){const json=localStorage.getItem(STORAGE_KEY);if(!json){showStatus("No saved layout",false);return;}try{const d=JSON.parse(json);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}showStatus("✅ Loaded");}catch(e){showStatus("Load failed",false);}}
+function clearSave(){localStorage.removeItem(STORAGE_KEY);showStatus("🗑 Cleared");}
+function onMouseClick(e){if(!EDIT_MODE)return;const rect=renderer.domElement.getBoundingClientRect();mouse.x=((e.clientX-rect.left)/rect.width)*2-1;mouse.y=-((e.clientY-rect.top)/rect.height)*2+1;raycaster.setFromCamera(mouse,camera);const meshes=[];editableObjects.forEach(o=>{if(o.isMesh)meshes.push(o);else o.traverse(ch=>{if(ch.isMesh)meshes.push(ch);});});const hits=raycaster.intersectObjects(meshes,false);if(!hits.length){selectedObject=null;document.getElementById("selInfo").style.display="none";return;}let obj=hits[0].object;let cur=obj;while(cur){if(editableObjects.includes(cur)){obj=cur;break;}cur=cur.parent;}selectedObject=obj;document.getElementById("selInfo").style.display="block";document.getElementById("selInfo").textContent=`✏️ ${obj.userData.editId} | Arrows=Move Shift+↑↓=Height R=Rotate Del=Delete`;showStatus("Selected: "+obj.userData.editId);}
+function buildDebug(){debugGroup=new THREE.Group();debugGroup.visible=false;scene.add(debugGroup);const g=new THREE.GridHelper(4000,80,0x4488ff,0x222244);g.position.y=5;debugGroup.add(g);const a=new THREE.AxesHelper(400);a.position.y=10;debugGroup.add(a);}
+function toggleDebug(){DEBUG_ON=!DEBUG_ON;if(debugGroup)debugGroup.visible=DEBUG_ON;const hud=document.getElementById("debugHud");hud.style.display=DEBUG_ON?"block":"none";if(DEBUG_ON){positionDisplayInterval=setInterval(()=>{const p=camera.position,yd=((yaw||0)*(180/Math.PI)).toFixed(1);document.getElementById("debugHud").innerHTML=`X: ${p.x.toFixed(1)}<br>Y: ${p.y.toFixed(1)}<br>Z: ${p.z.toFixed(1)}<br>Yaw: ${yd}°`;},100);}else{clearInterval(positionDisplayInterval);}}
+
+// ── SVG Textures ──
+const _svgCache={};
+function makeSVGTexture(svgStr,w,h){
+  const key=svgStr+(w||512)+(h||512);
+  if(_svgCache[key])return _svgCache[key];
+  try{const cw=w||512,ch=h||512;const canvas=document.createElement('canvas');canvas.width=cw;canvas.height=ch;const ctx=canvas.getContext('2d');const blob=new Blob([svgStr],{type:'image/svg+xml'});const url=URL.createObjectURL(blob);const tex=new THREE.CanvasTexture(canvas);const mat=new THREE.MeshLambertMaterial({map:tex,color:0xffffff,side:THREE.DoubleSide});const img=new Image();img.onload=()=>{ctx.drawImage(img,0,0,cw,ch);tex.needsUpdate=true;URL.revokeObjectURL(url);};img.src=url;_svgCache[key]=mat;return mat;}
+  catch(e){return new THREE.MeshLambertMaterial({color:0x9a7050,side:THREE.DoubleSide});}
+}
+
+// Toga/fabric hanging pattern
+const SVG_TOGA=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 400">
+<rect width="200" height="400" fill="#e8e0d0"/>
+<rect x="0" y="0" width="200" height="400" fill="#f0e8d8" opacity="0.5"/>
+<!-- Vertical drape folds -->
+<line x1="40" y1="0" x2="36" y2="400" stroke="#d0c8b8" stroke-width="3"/>
+<line x1="80" y1="0" x2="76" y2="400" stroke="#d0c8b8" stroke-width="2"/>
+<line x1="120" y1="0" x2="116" y2="400" stroke="#d0c8b8" stroke-width="3"/>
+<line x1="160" y1="0" x2="156" y2="400" stroke="#d0c8b8" stroke-width="2"/>
+<!-- Purple border stripe (senatorial) -->
+<rect x="0" y="0" width="14" height="400" fill="#501860" opacity="0.8"/>
+<rect x="186" y="0" width="14" height="400" fill="#501860" opacity="0.8"/>
+<!-- Gold hem -->
+<rect x="0" y="385" width="200" height="15" fill="#c8a030" opacity="0.9"/>
+<rect x="0" y="0" width="200" height="10" fill="#c8a030" opacity="0.6"/>
+</svg>`;
+
+const SVG_PURPLE_TOGA=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 400">
+<rect width="200" height="400" fill="#5a1868"/>
+<rect x="0" y="0" width="200" height="400" fill="#6a2078" opacity="0.5"/>
+<line x1="40" y1="0" x2="36" y2="400" stroke="#4a1058" stroke-width="3"/>
+<line x1="80" y1="0" x2="76" y2="400" stroke="#4a1058" stroke-width="2"/>
+<line x1="120" y1="0" x2="116" y2="400" stroke="#4a1058" stroke-width="3"/>
+<line x1="160" y1="0" x2="156" y2="400" stroke="#4a1058" stroke-width="2"/>
+<!-- Gold border (imperial) -->
+<rect x="0" y="0" width="18" height="400" fill="#c8a030" opacity="0.9"/>
+<rect x="182" y="0" width="18" height="400" fill="#c8a030" opacity="0.9"/>
+<rect x="0" y="385" width="200" height="15" fill="#c8a030"/>
+<rect x="0" y="0" width="200" height="12" fill="#c8a030"/>
+</svg>`;
+
+const SVG_RED_PALUDAMENTUM=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 400">
+<rect width="200" height="400" fill="#8a1010"/>
+<rect x="0" y="0" width="200" height="400" fill="#a02020" opacity="0.4"/>
+<line x1="40" y1="0" x2="38" y2="400" stroke="#701010" stroke-width="3"/>
+<line x1="80" y1="0" x2="78" y2="400" stroke="#701010" stroke-width="2"/>
+<line x1="120" y1="0" x2="118" y2="400" stroke="#701010" stroke-width="3"/>
+<line x1="160" y1="0" x2="158" y2="400" stroke="#701010" stroke-width="2"/>
+<!-- Gold fibula decoration -->
+<circle cx="100" cy="30" r="14" fill="#c8a030" stroke="#a07820" stroke-width="2"/>
+<circle cx="100" cy="30" r="8" fill="#e0b840"/>
+<rect x="0" y="385" width="200" height="15" fill="#c8a030" opacity="0.8"/>
+</svg>`;
+
+// Mirror reflection pattern
+const SVG_MIRROR=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400">
+<rect width="300" height="400" fill="#8a9090"/>
+<rect x="0" y="0" width="300" height="400" fill="#a0b0b0" opacity="0.5"/>
+<!-- Reflection shimmer lines -->
+<line x1="0" y1="100" x2="300" y2="80" stroke="#c0d0d0" stroke-width="2" opacity="0.4"/>
+<line x1="0" y1="200" x2="300" y2="190" stroke="#c0d0d0" stroke-width="1.5" opacity="0.3"/>
+<line x1="0" y1="300" x2="300" y2="310" stroke="#c0d0d0" stroke-width="2" opacity="0.4"/>
+<!-- Vague reflection of a figure -->
+<ellipse cx="150" cy="120" rx="28" ry="34" fill="#707878" opacity="0.4"/>
+<rect x="110" y="154" width="80" height="160" fill="#606868" opacity="0.3" rx="4"/>
+<!-- Highlight spot -->
+<ellipse cx="80" cy="60" rx="40" ry="20" fill="#d8e8e8" opacity="0.3"/>
+</svg>`;
+
+// Jewellery/cosmetics pattern for shelf
+const SVG_COSMETICS=`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 180">
+<rect width="300" height="180" fill="#c8a060"/>
+<!-- Small alabaster jar -->
+<ellipse cx="50" cy="110" rx="18" ry="22" fill="#e8e0d0"/>
+<ellipse cx="50" cy="88" rx="14" ry="8" fill="#e8e0d0"/>
+<rect x="44" y="80" width="12" height="10" fill="#d8d0c0"/>
+<!-- Kohl pot -->
+<ellipse cx="110" cy="118" rx="14" ry="14" fill="#3a2808"/>
+<ellipse cx="110" cy="104" rx="12" ry="6" fill="#4a3010"/>
+<!-- Gold fibula brooch -->
+<ellipse cx="170" cy="100" rx="22" ry="10" fill="#c8a030" stroke="#a07820" stroke-width="2"/>
+<circle cx="170" cy="100" r="7" fill="#e8c040"/>
+<!-- Pearl necklace suggestion -->
+<g fill="#e8e8e0">
+  <circle cx="220" cy="90" r="5"/><circle cx="232" cy="84" r="5"/><circle cx="244" cy="82" r="5"/>
+  <circle cx="256" cy="84" r="5"/><circle cx="268" cy="90" r="5"/>
+  <circle cx="220" cy="102" r="5"/><circle cx="268" cy="102" r="5"/>
+</g>
+<!-- Strigil (scraping tool) -->
+<path d="M270 130 Q280 110 285 90" fill="none" stroke="#8a8070" stroke-width="4" stroke-linecap="round"/>
+<ellipse cx="270" cy="132" rx="6" ry="4" fill="#8a8070"/>
+<text x="150" y="172" text-anchor="middle" fill="#7a5010" font-size="11" font-family="Georgia,serif" font-style="italic">Toilette of Venus</text>
+</svg>`;
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById("fadeOverlay");if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x1a1410);
+  scene.fog=new THREE.FogExp2(0x1a1410,0.0005);
+  camera=new THREE.PerspectiveCamera(72,window.innerWidth/window.innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Warm torch lighting — intimate room
+  scene.add(new THREE.AmbientLight(0x887060,0.8));
+  const fillLight=new THREE.DirectionalLight(0xfff0e0,0.4);fillLight.position.set(0,1,0.5);scene.add(fillLight);
+  const torch1=new THREE.PointLight(0xff9030,1.2,500);torch1.position.set(-RW/3,200*S,0);scene.add(torch1);
+  const torch2=new THREE.PointLight(0xff9030,1.2,500);torch2.position.set(RW/3,200*S,0);scene.add(torch2);
+  const torch3=new THREE.PointLight(0xff7820,0.8,400);torch3.position.set(0,200*S,-RD/3);scene.add(torch3);
+
+  buildRoom();
+  buildDebug();
+
+  const saved=localStorage.getItem(STORAGE_KEY);
+  if(saved){try{const d=JSON.parse(saved);for(const e of d.objects){const o=editableObjects.find(x=>x.userData.editId===e.id);if(!o)continue;o.position.set(e.position.x,e.position.y,e.position.z);o.quaternion.set(e.quaternion.x,e.quaternion.y,e.quaternion.z,e.quaternion.w);o.scale.set(e.scale.x,e.scale.y,e.scale.z);}}catch(err){}}
+
+  document.getElementById("editBtn").addEventListener("click",toggleEditMode);
+  document.getElementById("saveBtn").addEventListener("click",saveLayout);
+  document.getElementById("loadBtn").addEventListener("click",loadLayout);
+  document.getElementById("clearBtn").addEventListener("click",clearSave);
+  renderer.domElement.addEventListener("click",onMouseClick);
+  document.addEventListener("keydown",onKeyDown);
+  document.addEventListener("keyup",onKeyUp);
+  window.addEventListener("resize",onResize);
+
+  // Spawn facing the room (back toward entry door)
+  camera.position.set(0,240*S,RD/2-120*S);
+  yaw=0; updateRotation(); animate();
+}
+
+function buildRoom(){
+  // ── Materials ──
+  const marbleWhite =new THREE.MeshLambertMaterial({color:0xd8d0c4});
+  const marbleGrey  =new THREE.MeshLambertMaterial({color:0xa09888});
+  const marbleDark  =new THREE.MeshLambertMaterial({color:0x807870});
+  const goldMat     =new THREE.MeshLambertMaterial({color:0xc8960c});
+  const goldDark    =new THREE.MeshLambertMaterial({color:0x8a6008});
+  const terracotta  =new THREE.MeshLambertMaterial({color:0xb84820});
+  const frescoRed   =new THREE.MeshLambertMaterial({color:0x8a1818});
+  const ochre       =new THREE.MeshLambertMaterial({color:0xb88030});
+  const darkStone   =new THREE.MeshLambertMaterial({color:0x302820});
+  const ironMat     =new THREE.MeshLambertMaterial({color:0x1a1614});
+  const bronzeMat   =new THREE.MeshLambertMaterial({color:0x7a5018});
+  const purpleMat   =new THREE.MeshLambertMaterial({color:0x501860});
+  const woodMat     =new THREE.MeshLambertMaterial({color:0x5a3010});
+  const creamMat    =new THREE.MeshLambertMaterial({color:0xe0d8c0});
+  const flameMat    =new THREE.MeshLambertMaterial({color:0xffaa00,emissive:0xff6600,emissiveIntensity:1.2});
+  const mirrorMat   =new THREE.MeshLambertMaterial({color:0x90a0a0,side:THREE.DoubleSide});
+
+  // ── FLOOR — dark polished stone ──
+  const floor=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),new THREE.MeshLambertMaterial({color:0x5a5248}));floor.rotation.x=-Math.PI/2;scene.add(floor);
+  const tSz=60*S;
+  for(let ix=0;ix<Math.ceil(RW/tSz);ix++)for(let iz=0;iz<Math.ceil(RD/tSz);iz++){
+    const c=(ix+iz)%2===0?0x6a6258:0x504a44;
+    const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-2,2*S,tSz-2),new THREE.MeshLambertMaterial({color:c}));
+    t.position.set(-RW/2+tSz*(ix+0.5),1*S,-RD/2+tSz*(iz+0.5));scene.add(t);
+  }
+  // Terracotta border strip
+  [-1,1].forEach(s=>{
+    const b=new THREE.Mesh(new THREE.BoxGeometry(RW,3*S,20*S),new THREE.MeshLambertMaterial({color:0x7a3818}));b.position.set(0,2*S,s*(RD/2-10*S));scene.add(b);
+    const b2=new THREE.Mesh(new THREE.BoxGeometry(20*S,3*S,RD),new THREE.MeshLambertMaterial({color:0x7a3818}));b2.position.set(s*(RW/2-10*S),2*S,0);scene.add(b2);
+  });
+
+  // ── CEILING ──
+  const ceil=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),new THREE.MeshLambertMaterial({color:0xb89840}));ceil.rotation.x=Math.PI/2;ceil.position.y=RH;scene.add(ceil);
+  // Coffered beams
+  [-RW/4,0,RW/4].forEach(cx=>{
+    const beam=new THREE.Mesh(new THREE.BoxGeometry(18*S,20*S,RD),woodMat);beam.position.set(cx,RH-10*S,0);scene.add(beam);
+    const beamG=new THREE.Mesh(new THREE.BoxGeometry(20*S,6*S,RD),goldDark);beamG.position.set(cx,RH-22*S,0);scene.add(beamG);
+  });
+  [-RD/4,0,RD/4].forEach(cz=>{
+    const beam=new THREE.Mesh(new THREE.BoxGeometry(RW,20*S,18*S),woodMat);beam.position.set(0,RH-10*S,cz);scene.add(beam);
+    const beamG=new THREE.Mesh(new THREE.BoxGeometry(RW,6*S,20*S),goldDark);beamG.position.set(0,RH-22*S,cz);scene.add(beamG);
+  });
+  // Ceiling cornice
+  for(let i=0;i<4;i++){const a=i*Math.PI/2;const iL=i%2===0;const m=new THREE.Mesh(new THREE.BoxGeometry(iL?RW:RD,18*S,16*S),marbleWhite);m.rotation.y=a;m.position.set(Math.sin(a)*(iL?0:RD/2-8*S),RH-9*S,Math.cos(a)*(iL?-RD/2+8*S:0));scene.add(m);}
+
+  // ── WALLS — Pompeian red dado + ochre upper ──
+  // Back wall (far from entry)
+  const dado=new THREE.Mesh(new THREE.BoxGeometry(RW,100*S,10*S),frescoRed);dado.position.set(0,50*S,-RD/2+6*S);scene.add(dado);
+  const dadoRail=new THREE.Mesh(new THREE.BoxGeometry(RW,8*S,12*S),goldMat);dadoRail.position.set(0,102*S,-RD/2+7*S);scene.add(dadoRail);
+  const backUpper=new THREE.Mesh(new THREE.BoxGeometry(RW,RH-120*S,8*S),new THREE.MeshLambertMaterial({color:0xb89050}));backUpper.position.set(0,RH/2+10*S,-RD/2+5*S);scene.add(backUpper);
+  const corniceBack=new THREE.Mesh(new THREE.BoxGeometry(RW,20*S,18*S),marbleWhite);corniceBack.position.set(0,RH-10*S,-RD/2+10*S);scene.add(corniceBack);
+  // Back wall pilasters
+  [-RW/4,RW/4].forEach(px=>{
+    const pil=new THREE.Mesh(new THREE.BoxGeometry(22*S,RH-20*S,18*S),marbleWhite);pil.position.set(px,RH/2,-RD/2+10*S);scene.add(pil);
+    const cap=new THREE.Mesh(new THREE.BoxGeometry(36*S,16*S,20*S),marbleWhite);cap.position.set(px,RH-18*S,-RD/2+10*S);scene.add(cap);
+    const capG=new THREE.Mesh(new THREE.BoxGeometry(38*S,5*S,22*S),goldMat);capG.position.set(px,RH-9*S,-RD/2+10*S);scene.add(capG);
+    const base=new THREE.Mesh(new THREE.BoxGeometry(36*S,14*S,20*S),marbleWhite);base.position.set(px,8*S,-RD/2+10*S);scene.add(base);
+  });
+  // Side walls
+  [-1,1].forEach(s=>{
+    const sd=new THREE.Mesh(new THREE.BoxGeometry(10*S,100*S,RD),frescoRed);sd.position.set(s*(RW/2-6*S),50*S,0);scene.add(sd);
+    const sdr=new THREE.Mesh(new THREE.BoxGeometry(12*S,8*S,RD),goldMat);sdr.position.set(s*(RW/2-7*S),102*S,0);scene.add(sdr);
+    const su=new THREE.Mesh(new THREE.BoxGeometry(8*S,RH-120*S,RD),new THREE.MeshLambertMaterial({color:0xb08840}));su.position.set(s*(RW/2-5*S),RH/2+10*S,0);scene.add(su);
+    const sc=new THREE.Mesh(new THREE.BoxGeometry(18*S,20*S,RD),marbleWhite);sc.position.set(s*(RW/2-10*S),RH-10*S,0);scene.add(sc);
+    // Side pilasters
+    [-RD/4,RD/4].forEach(pz=>{
+      const pil=new THREE.Mesh(new THREE.BoxGeometry(18*S,RH-20*S,22*S),marbleWhite);pil.position.set(s*(RW/2-10*S),RH/2,pz);scene.add(pil);
+      const cap=new THREE.Mesh(new THREE.BoxGeometry(20*S,16*S,36*S),marbleWhite);cap.position.set(s*(RW/2-10*S),RH-18*S,pz);scene.add(cap);
+      const cg=new THREE.Mesh(new THREE.BoxGeometry(22*S,5*S,38*S),goldMat);cg.position.set(s*(RW/2-10*S),RH-9*S,pz);scene.add(cg);
+    });
+  });
+  // Front wall with entry arch opening
+  const archW=240*S,fSideW=(RW-archW)/2;
+  const fL=new THREE.Mesh(new THREE.BoxGeometry(fSideW,RH,10*S),new THREE.MeshLambertMaterial({color:0xb08840}));fL.position.set(-(archW/2+fSideW/2),RH/2,RD/2-5*S);scene.add(fL);
+  const fR=fL.clone();fR.position.x=archW/2+fSideW/2;scene.add(fR);
+  const fAbove=new THREE.Mesh(new THREE.BoxGeometry(RW,RH/4,10*S),new THREE.MeshLambertMaterial({color:0xb08840}));fAbove.position.set(0,RH-RH/8,RD/2-5*S);scene.add(fAbove);
+  // Arch frame
+  const archFrame=new THREE.Mesh(new THREE.BoxGeometry(archW+40*S,RH*0.8+20*S,14*S),marbleWhite);archFrame.position.set(0,RH*0.4,RD/2-8*S);scene.add(archFrame);
+  const archTop=new THREE.Mesh(new THREE.CylinderGeometry(archW/2,archW/2,14*S,16,1,false,0,Math.PI),marbleWhite);archTop.rotation.z=Math.PI/2;archTop.position.set(0,RH*0.8,RD/2-8*S);scene.add(archTop);
+  const archKey=new THREE.Mesh(new THREE.BoxGeometry(28*S,36*S,16*S),goldMat);archKey.position.set(0,RH*0.8+archW/2,RD/2-8*S);scene.add(archKey);
+  const fdado=new THREE.Mesh(new THREE.BoxGeometry(RW,100*S,10*S),frescoRed);fdado.position.set(0,50*S,RD/2-6*S);scene.add(fdado);
+  const fcornice=new THREE.Mesh(new THREE.BoxGeometry(RW,20*S,18*S),marbleWhite);fcornice.position.set(0,RH-10*S,RD/2-10*S);scene.add(fcornice);
+
+  // ── WARDROBE CABINETS — back wall, two units ──
+  [-1,1].forEach((s,wi)=>{
+    const nichX=s*RW/4;
+    const cabW=200*S, cabH=RH*0.72, cabD=40*S;
+
+    // Cabinet body
+    const cabBody=new THREE.Mesh(new THREE.BoxGeometry(cabW,cabH,cabD),woodMat);
+    cabBody.position.set(nichX,cabH/2,-RD/2+cabD/2+8*S);scene.add(cabBody);
+    // Back panel (lighter wood interior)
+    const cabBack=new THREE.Mesh(new THREE.BoxGeometry(cabW-6*S,cabH-6*S,4*S),new THREE.MeshLambertMaterial({color:0x7a4818}));
+    cabBack.position.set(nichX,cabH/2,-RD/2+8*S+4*S);scene.add(cabBack);
+
+    // Marble frame around cabinet face
+    const fTop=new THREE.Mesh(new THREE.BoxGeometry(cabW+30*S,18*S,cabD+10*S),marbleWhite);fTop.position.set(nichX,cabH+9*S,-RD/2+cabD/2+8*S);scene.add(fTop);
+    const fTopG=new THREE.Mesh(new THREE.BoxGeometry(cabW+34*S,6*S,cabD+14*S),goldMat);fTopG.position.set(nichX,cabH+20*S,-RD/2+cabD/2+8*S);scene.add(fTopG);
+    [-1,1].forEach(js=>{
+      const fJamb=new THREE.Mesh(new THREE.BoxGeometry(18*S,cabH+4*S,cabD+10*S),marbleWhite);fJamb.position.set(nichX+js*(cabW/2+9*S),cabH/2,-RD/2+cabD/2+8*S);scene.add(fJamb);
+    });
+    const fBase=new THREE.Mesh(new THREE.BoxGeometry(cabW+30*S,14*S,cabD+10*S),marbleWhite);fBase.position.set(nichX,7*S,-RD/2+cabD/2+8*S);scene.add(fBase);
+    // Gold pediment keystone
+    const nKey=new THREE.Mesh(new THREE.BoxGeometry(22*S,30*S,cabD+12*S),goldMat);nKey.position.set(nichX,cabH+32*S,-RD/2+cabD/2+8*S);scene.add(nKey);
+
+    // Gold curtain rod across top of cabinet interior
+    const rod=new THREE.Mesh(new THREE.CylinderGeometry(3*S,3*S,cabW-10*S,8),goldMat);
+    rod.rotation.z=Math.PI/2;rod.position.set(nichX,cabH-16*S,-RD/2+cabD-6*S);scene.add(rod);
+    for(let r=0;r<7;r++){
+      const ring=new THREE.Mesh(new THREE.TorusGeometry(4*S,1.5*S,6,8),goldDark);
+      ring.rotation.x=Math.PI/2;ring.position.set(nichX-cabW/2+14*S+r*(cabW-18*S)/6,cabH-20*S,-RD/2+cabD-4*S);scene.add(ring);
+    }
+
+    // Hanging garments — three fabric planes, visible face-on
+    const garments=[SVG_TOGA,SVG_PURPLE_TOGA,SVG_RED_PALUDAMENTUM];
+    const gW=56*S,gH=150*S;
+    for(let g=0;g<3;g++){
+      const gMesh=new THREE.Mesh(new THREE.PlaneGeometry(gW,gH),makeSVGTexture(garments[g],256,512));
+      gMesh.position.set(nichX-cabW/2+20*S+g*((cabW-20*S)/3)+gW/2,cabH-26*S-gH/2,-RD/2+cabD-2*S);
+      scene.add(gMesh);
+    }
+
+    // Cedar chest below cabinet
+    const chestG=new THREE.Group();
+    const chestBody=new THREE.Mesh(new THREE.BoxGeometry(160*S,52*S,70*S),woodMat);chestBody.position.set(0,26*S,0);chestG.add(chestBody);
+    const chestLid=new THREE.Mesh(new THREE.BoxGeometry(162*S,16*S,72*S),new THREE.MeshLambertMaterial({color:0x6a3810}));chestLid.position.set(0,55*S,0);chestG.add(chestLid);
+    const chestGold=new THREE.Mesh(new THREE.BoxGeometry(164*S,5*S,74*S),goldDark);chestGold.position.set(0,64*S,0);chestG.add(chestGold);
+    for(let r=0;r<2;r++)for(let c=0;c<5;c++){
+      const st=new THREE.Mesh(new THREE.SphereGeometry(3*S,6,6),ironMat);
+      st.position.set(-60*S+c*30*S,26*S+r*20*S,37*S);chestG.add(st);
+    }
+    const hasp=new THREE.Mesh(new THREE.BoxGeometry(18*S,5*S,5*S),bronzeMat);hasp.position.set(0,52*S,37*S);chestG.add(hasp);
+    chestG.position.set(nichX,0,-RD/2+cabD+50*S);
+    addGroup(chestG,"chest_"+(wi+1));
+  });
+
+  // ── LARGE BRONZE MIRROR — centre back wall ──
+  const mirG=new THREE.Group();
+  // Bronze frame
+  const mOuter=new THREE.Mesh(new THREE.CylinderGeometry(90*S,90*S,12*S,24),bronzeMat);mOuter.rotation.x=Math.PI/2;mOuter.position.set(0,0,0);mirG.add(mOuter);
+  const mInner=new THREE.Mesh(new THREE.CylinderGeometry(80*S,80*S,8*S,24),new THREE.MeshLambertMaterial({color:0x507878}));mInner.rotation.x=Math.PI/2;mInner.position.set(0,0,2*S);mirG.add(mInner);
+  // Mirror face
+  const mFace=new THREE.Mesh(new THREE.CircleGeometry(78*S,24),makeSVGTexture(SVG_MIRROR,512,512));mFace.position.set(0,0,7*S);mirG.add(mFace);
+  // Decorative handle below
+  const mHandle=new THREE.Mesh(new THREE.CylinderGeometry(10*S,14*S,80*S,10),bronzeMat);mHandle.position.set(0,-100*S,-2*S);mirG.add(mHandle);
+  const mBase=new THREE.Mesh(new THREE.CylinderGeometry(22*S,18*S,14*S,10),bronzeMat);mBase.position.set(0,-145*S,-2*S);mirG.add(mBase);
+  // Engraved border details on frame
+  for(let i=0;i<16;i++){const a=i/16*Math.PI*2;const boss=new THREE.Mesh(new THREE.SphereGeometry(5*S,6,6),goldMat);boss.position.set(Math.cos(a)*88*S,Math.sin(a)*88*S,4*S);mirG.add(boss);}
+  mirG.position.set(0,340*S,-RD/2+22*S);
+  addGroup(mirG,"mirror");
+
+  // ── VANITY TABLE — centre of room ──
+  const vanG=new THREE.Group();
+  // Marble top
+  const vanTop=new THREE.Mesh(new THREE.BoxGeometry(240*S,12*S,100*S),marbleWhite);vanTop.position.set(0,100*S,0);vanG.add(vanTop);
+  const vanEdge=new THREE.Mesh(new THREE.BoxGeometry(244*S,6*S,104*S),goldMat);vanEdge.position.set(0,94*S,0);vanG.add(vanEdge);
+  // Four bronze legs
+  [[-100*S,40*S],[100*S,40*S],[-100*S,-40*S],[100*S,-40*S]].forEach(([lx,lz])=>{
+    const leg=new THREE.Mesh(new THREE.CylinderGeometry(7*S,9*S,92*S,10),bronzeMat);leg.position.set(lx,46*S,lz);vanG.add(leg);
+    const foot=new THREE.Mesh(new THREE.SphereGeometry(10*S,8,8),bronzeMat);foot.position.set(lx,4*S,lz);vanG.add(foot);
+    const cap=new THREE.Mesh(new THREE.CylinderGeometry(11*S,7*S,8*S,10),goldDark);cap.position.set(lx,96*S,lz);vanG.add(cap);
+  });
+  // Shelf below tabletop
+  const shelf=new THREE.Mesh(new THREE.BoxGeometry(220*S,8*S,88*S),woodMat);shelf.position.set(0,48*S,0);vanG.add(shelf);
+  // Cosmetics display on top
+  const cosPanel=new THREE.Mesh(new THREE.PlaneGeometry(220*S,130*S),makeSVGTexture(SVG_COSMETICS,512,256));cosPanel.rotation.x=-Math.PI/2;cosPanel.position.set(0,109*S,0);vanG.add(cosPanel);
+  // Small oil lamp on table
+  const lampBowl=new THREE.Mesh(new THREE.CylinderGeometry(10*S,7*S,8*S,10),bronzeMat);lampBowl.position.set(90*S,110*S,30*S);vanG.add(lampBowl);
+  const lampFlame=new THREE.Mesh(new THREE.SphereGeometry(5*S,6,6),flameMat);lampFlame.position.set(90*S,118*S,30*S);vanG.add(lampFlame);
+  const lampLight=new THREE.PointLight(0xffaa30,0.6,150);lampLight.position.set(90*S,120*S,30*S);vanG.add(lampLight);
+  // Stool in front of vanity
+  const stoolG=new THREE.Group();
+  const stoolSeat=new THREE.Mesh(new THREE.CylinderGeometry(36*S,36*S,10*S,12),new THREE.MeshLambertMaterial({color:0x7a2020}));stoolSeat.position.set(0,68*S,0);stoolG.add(stoolSeat);
+  const stoolCush=new THREE.Mesh(new THREE.CylinderGeometry(32*S,32*S,8*S,12),purpleMat);stoolCush.position.set(0,74*S,0);stoolG.add(stoolCush);
+  for(let f=0;f<3;f++){const fa=f*(Math.PI*2/3);const sl=new THREE.Mesh(new THREE.CylinderGeometry(5*S,7*S,66*S,8),woodMat);sl.position.set(Math.cos(fa)*26*S,33*S,Math.sin(fa)*26*S);stoolG.add(sl);}
+  stoolG.position.set(0,0,70*S);
+  vanG.position.set(0,0,-40*S);
+  addGroup(vanG,"vanity");
+  scene.add(stoolG);
+  addGroup(stoolG,"stool");
+
+  // ── WALL TORCH SCONCES ──
+  [[-RW/2+18*S,-RD/4],[RW/2-18*S,-RD/4],[-RW/2+18*S,RD/4],[RW/2-18*S,RD/4]].forEach(([tx,tz],ti)=>{
+    const tG=new THREE.Group();
+    const tBracket=new THREE.Mesh(new THREE.BoxGeometry(20*S,8*S,40*S),ironMat);tBracket.position.set(0,0,20*S);tG.add(tBracket);
+    const tBowl=new THREE.Mesh(new THREE.CylinderGeometry(12*S,8*S,12*S,10),bronzeMat);tBowl.position.set(0,6*S,36*S);tG.add(tBowl);
+    const tFlame=new THREE.Mesh(new THREE.ConeGeometry(8*S,22*S,8),flameMat);tFlame.position.set(0,20*S,36*S);tG.add(tFlame);
+    const tLight=new THREE.PointLight(0xffaa30,1.0,280);tLight.position.set(0,22*S,36*S);tG.add(tLight);
+    tG.position.set(tx,220*S,tz);
+    if(tx<0)tG.rotation.y=Math.PI/2;else tG.rotation.y=-Math.PI/2;
+    addGroup(tG,"sconce_"+(ti+1));
+  });
+
+  // ── SHOE/SANDAL SHELF — right side wall ──
+  const shelfG=new THREE.Group();
+  const shBack=new THREE.Mesh(new THREE.BoxGeometry(10*S,220*S,280*S),darkStone);shBack.position.set(0,110*S,0);shelfG.add(shBack);
+  const shFront=new THREE.Mesh(new THREE.BoxGeometry(16*S,226*S,286*S),marbleWhite);shFront.position.set(-4*S,110*S,0);shelfG.add(shFront);
+  [60*S,130*S,200*S].forEach(sy=>{
+    const sl=new THREE.Mesh(new THREE.BoxGeometry(10*S,8*S,272*S),woodMat);sl.position.set(0,sy,0);shelfG.add(sl);
+    const slG=new THREE.Mesh(new THREE.BoxGeometry(12*S,4*S,276*S),goldDark);slG.position.set(-1*S,sy-7*S,0);shelfG.add(slG);
+    // Sandals on shelf (simple shapes)
+    for(let si=0;si<4;si++){
+      const sandal=new THREE.Mesh(new THREE.BoxGeometry(6*S,6*S,40*S),new THREE.MeshLambertMaterial({color:0x8a5820}));sandal.position.set(0,sy+8*S,-100*S+si*66*S);shelfG.add(sandal);
+      const strap=new THREE.Mesh(new THREE.BoxGeometry(6*S,10*S,4*S),new THREE.MeshLambertMaterial({color:0x7a4810}));strap.position.set(0,sy+12*S,-80*S+si*66*S);shelfG.add(strap);
+    }
+  });
+  shelfG.position.set(RW/2-10*S,0,-RD/4);
+  addGroup(shelfG,"sandal_shelf");
+
+  // ── JEWELLERY/ACCESSORY CABINET — left side wall ──
+  const cabG=new THREE.Group();
+  const cabBody=new THREE.Mesh(new THREE.BoxGeometry(10*S,280*S,200*S),woodMat);cabBody.position.set(0,140*S,0);cabG.add(cabBody);
+  const cabFront=new THREE.Mesh(new THREE.BoxGeometry(16*S,284*S,204*S),marbleGrey);cabFront.position.set(-4*S,140*S,0);cabG.add(cabFront);
+  [-1,1].forEach(ds=>{
+    const dp=new THREE.Mesh(new THREE.BoxGeometry(14*S,120*S,88*S),woodMat);dp.position.set(4*S,140*S,ds*50*S);cabG.add(dp);
+    const dpInner=new THREE.Mesh(new THREE.BoxGeometry(12*S,100*S,70*S),new THREE.MeshLambertMaterial({color:0x6a3808}));dpInner.position.set(6*S,140*S,ds*50*S);cabG.add(dpInner);
+    const knob=new THREE.Mesh(new THREE.SphereGeometry(5*S,8,8),goldMat);knob.position.set(8*S,140*S,ds*16*S);cabG.add(knob);
+  });
+  const cabTop=new THREE.Mesh(new THREE.BoxGeometry(18*S,16*S,210*S),goldDark);cabTop.position.set(0,284*S,0);cabG.add(cabTop);
+  const cabTopG=new THREE.Mesh(new THREE.BoxGeometry(20*S,8*S,214*S),goldMat);cabTopG.position.set(0,295*S,0);cabG.add(cabTopG);
+  // Small decorative items on top of cabinet
+  [-60*S,0,60*S].forEach((ox,oi)=>{
+    const vase=new THREE.Mesh(new THREE.CylinderGeometry(oi===1?12*S:9*S,7*S,30*S,8),terracotta);vase.position.set(ox,310*S,0);cabG.add(vase);
+    const vaseNeck=new THREE.Mesh(new THREE.CylinderGeometry(5*S,9*S,10*S,8),terracotta);vaseNeck.position.set(ox,328*S,0);cabG.add(vaseNeck);
+  });
+  cabG.position.set(-RW/2+10*S,0,RD/4);
+  addGroup(cabG,"jewellery_cabinet");
+
+  // ── DECORATIVE RUG ──
+  const rugG=new THREE.Group();
+  const rugBase=new THREE.Mesh(new THREE.BoxGeometry(300*S,3*S,200*S),new THREE.MeshLambertMaterial({color:0x501808}));rugBase.position.y=1.5*S;rugG.add(rugBase);
+  const rugField=new THREE.Mesh(new THREE.BoxGeometry(284*S,3*S,184*S),new THREE.MeshLambertMaterial({color:0x6a2010}));rugField.position.y=4.5*S;rugG.add(rugField);
+  [-1,1].forEach(s=>{
+    const rb=new THREE.Mesh(new THREE.BoxGeometry(284*S,4*S,10*S),goldDark);rb.position.set(0,6*S,s*92*S);rugG.add(rb);
+    const rb2=new THREE.Mesh(new THREE.BoxGeometry(10*S,4*S,184*S),goldDark);rb2.position.set(s*137*S,6*S,0);rugG.add(rb2);
+  });
+  rugG.position.set(0,0,-40*S);
+  addGroup(rugG,"rug");
+
+  // ── EXIT DOOR — front wall arch (back toward suite) ──
+  // The arch frame is already part of the wall; add door leaves inside it
+  const dW=110*S,dH=RH*0.75,doorZ=RD/2-6*S;
+  const exitDoorG=new THREE.Group();
+  [-1,1].forEach(s=>{
+    const door=new THREE.Mesh(new THREE.BoxGeometry(dW-4*S,dH,12*S),woodMat);door.position.set(s*dW/2,dH/2,0);exitDoorG.add(door);
+    [0.15,0.4,0.65,0.87].forEach(py=>{const pnl=new THREE.Mesh(new THREE.BoxGeometry(dW-22*S,dH*0.17,5*S),new THREE.MeshLambertMaterial({color:0x6a3808}));pnl.position.set(s*dW/2,py*dH,7*S);exitDoorG.add(pnl);});
+    for(let r=0;r<3;r++)for(let c=0;c<2;c++){const st=new THREE.Mesh(new THREE.SphereGeometry(3*S,6,6),ironMat);st.position.set(s*(dW/2)+(c-0.5)*22*S,50*S+r*70*S,8*S);exitDoorG.add(st);}
+    const hdl=new THREE.Mesh(new THREE.SphereGeometry(6*S,8,8),bronzeMat);hdl.position.set(s*10*S,dH*0.42,9*S);exitDoorG.add(hdl);
+  });
+  exitDoorG.position.set(0,0,doorZ);
+  addGroup(exitDoorG,"exit_door");
+}
+
+function onResize(){camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);}
+function updateRotation(){camera.rotation.order="YXZ";camera.rotation.set(0,yaw,0);}
+
+const exitCooldown=Date.now()+2500;
+
+function checkExitDoor(){
+  if(exitTriggered)return;
+  if(Date.now()<exitCooldown)return;
+  nearExit=camera.position.z>RD/2-200*S;
+  document.getElementById("doorHint").style.display=nearExit?"block":"none";
+}
+
+function onKeyDown(e){
+  if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code))e.preventDefault();
+  if(e.code==="KeyM"){toggleEditMode();return;}
+  if(e.code==="KeyG"){toggleDebug();return;}
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if(e.code==="KeyE"){
+    if(nearExit&&!exitTriggered){
+      exitTriggered=true;
+      document.getElementById("doorHint").style.display="none";
+      document.getElementById("exitFade").classList.add("show");
+      setTimeout(()=>window.location.href="romansuite.html?from=closet",600);
+    }
+    return;
+  }
+  if(EDIT_MODE&&selectedObject){
+    if(e.code==="Delete"||e.code==="Backspace"){e.preventDefault();scene.remove(selectedObject);const idx=editableObjects.indexOf(selectedObject);if(idx>-1)editableObjects.splice(idx,1);showStatus("🗑 Deleted");selectedObject=null;document.getElementById("selInfo").style.display="none";return;}
+    const speed=e.shiftKey?1:8;
+    if(!e.shiftKey){if(e.code==="ArrowUp")selectedObject.position.z-=speed;if(e.code==="ArrowDown")selectedObject.position.z+=speed;if(e.code==="ArrowLeft")selectedObject.position.x-=speed;if(e.code==="ArrowRight")selectedObject.position.x+=speed;}
+    if(e.shiftKey&&e.code==="ArrowUp")selectedObject.position.y+=speed;
+    if(e.shiftKey&&e.code==="ArrowDown")selectedObject.position.y-=speed;
+    if(e.code==="KeyR")selectedObject.rotation.y+=e.shiftKey?0.05:0.1;
+    return;
+  }
+  if(!EDIT_MODE){
+    if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=true;
+    if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=true;
+    if(e.code==="ArrowLeft")turnLeft=true;
+    if(e.code==="ArrowRight")turnRight=true;
+  }
+}
+function onKeyUp(e){
+  if(e.code==="KeyW"||e.code==="ArrowUp")moveForward=false;
+  if(e.code==="KeyS"||e.code==="ArrowDown")moveBackward=false;
+  if(e.code==="ArrowLeft")turnLeft=false;
+  if(e.code==="ArrowRight")turnRight=false;
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now(),delta=(now-prevTime)/1000;prevTime=now;
+  if(!EDIT_MODE){
+    if(turnLeft)yaw+=2.2*delta;if(turnRight)yaw-=2.2*delta;
+    const mv=Number(moveForward)-Number(moveBackward);
+    if(mv!==0&&window.SoundSystem)SoundSystem.footstep();
+    const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+    camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2-20*S,camera.position.x+fwd.x*mv*110*delta));
+    camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-15*S,camera.position.z+fwd.z*mv*110*delta));
+    camera.position.y=240*S;
+  }
+  checkExitDoor();
+  updateRotation();
+  renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+// engine scripts loaded below
+</script>
+<script src="../floor1/sound-system.js"></script>
+<script src="../floor1/mystery-engine.js"></script>
+<script src="../floor1/mystery-state.js"></script>
+<script src="../floor1/mystery-ui.js"></script>
+<script src="../floor1/evidence-system.js"></script>
+<script>
+(async () => {
+  await MysteryEngine.init();
+  let scenario = await MysteryState.load();
+  const isNew = !scenario;
+  if (isNew) { scenario = MysteryEngine.generate(); await MysteryState.save(scenario); }
+  window._scenario = scenario;
+  MysteryUI.init(scenario, isNew);
+  MysteryUI.setZone('romandressingroom');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'romandressingroom' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

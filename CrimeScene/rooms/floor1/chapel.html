@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Chapel</title>
+<style>
+#exitFade { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; z-index: 9999; transition: opacity 0.6s ease; }
+#exitFade.show { opacity: 1; }
+#doorHint { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); padding: 10px 24px; background: rgba(0,0,0,0.85); color: #ffdd88; border-radius: 8px; font-size: 17px; display: none; z-index: 50; font-family: system-ui, Arial, sans-serif; }
+#instructionLine {
+ position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+ padding: 8px 16px; font-size: 14px; color: #eee;
+ background: rgba(0,0,0,0.6); border-radius: 6px; z-index: 30;
+ pointer-events: none; white-space: nowrap;
+}
+body { margin: 0; overflow: hidden; background: #000; font-family: Arial, sans-serif; }
+#info {
+ position: absolute; top: 15px; left: 15px; color: #ddd; font-size: 15px;
+ background: rgba(0,0,0,0.7); padding: 12px; border-radius: 6px; z-index: 10;
+}
+canvas { display: block; }
+#fadeOverlay {
+ position: fixed; inset: 0; background: #000; z-index: 9999;
+ animation: fadeOut 0.8s ease forwards;
+}
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="doorHint">Press E — Return to Floor 1</div>
+<div id="instructionLine">Walk to the doors (rear) to exit</div>
+<div id="fadeOverlay"></div>
+<div id="info">
+ W / ↑ Forward &nbsp; S / ↓ Backward<br>
+ ← Turn Left &nbsp; → Turn Right
+</div>
+
+
+
+<script src="../../three.min.js"></script>
+<script>
+let scene, camera, renderer;
+let moveForward = false, moveBackward = false, turnLeft = false, turnRight = false;
+let yaw = 0;
+let prevTime = performance.now();
+const SCALE = 0.5;
+
+
+
+function init() {
+  setTimeout(() => { const f = document.getElementById('fadeOverlay'); if (f) f.remove(); }, 800);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0a0810);
+  scene.fog = new THREE.Fog(0x0a0810, 200, 600);
+
+  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 2000);
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Dim ambient — candlelit feel
+  scene.add(new THREE.AmbientLight(0x2a1a08, 1.0));
+  // Warm candlelight from altar end
+  const altarLight = new THREE.PointLight(0xffaa33, 2.5, 400);
+  altarLight.position.set(0, 80*SCALE, -300*SCALE);
+  scene.add(altarLight);
+  // Soft fill from above centre
+  const fillLight = new THREE.PointLight(0xffcc66, 0.8, 500);
+  fillLight.position.set(0, 160*SCALE, 0);
+  scene.add(fillLight);
+  // Cool blue from stained glass side
+  const glassLight = new THREE.PointLight(0x3355aa, 0.6, 300);
+  glassLight.position.set(-180*SCALE, 130*SCALE, -100*SCALE);
+  scene.add(glassLight);
+  const glassLight2 = new THREE.PointLight(0x33aa55, 0.5, 300);
+  glassLight2.position.set(180*SCALE, 130*SCALE, -100*SCALE);
+  scene.add(glassLight2);
+
+  buildChapel();
+
+  document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('keyup', onKeyUp);
+  window.addEventListener('resize', onResize);
+
+  const fromFloor1 = new URLSearchParams(window.location.search).get('from') === 'floor1';
+  if (fromFloor1) {
+    camera.position.set(0, 60*SCALE, 310*SCALE);
+    yaw = 0; // face toward altar
+  } else {
+    camera.position.set(0, 60*SCALE, 280*SCALE);
+    yaw = 0;
+  }
+  updateRotation();
+  animate();
+}
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function buildChapel() {
+  const S = SCALE;
+
+  // ── Materials ──
+  const stone     = new THREE.MeshLambertMaterial({ color: 0x7a7060 });
+  const stoneDark = new THREE.MeshLambertMaterial({ color: 0x4a4438 });
+  const wood      = new THREE.MeshLambertMaterial({ color: 0x3a2010 });
+  const woodLight = new THREE.MeshLambertMaterial({ color: 0x5a3418 });
+  const marble    = new THREE.MeshLambertMaterial({ color: 0xd8cfc0 });
+  const gold      = new THREE.MeshLambertMaterial({ color: 0xc8960a });
+  const white     = new THREE.MeshLambertMaterial({ color: 0xeeeedd });
+  const black     = new THREE.MeshLambertMaterial({ color: 0x111111 });
+  const red       = new THREE.MeshLambertMaterial({ color: 0x880011 });
+  const candleWax = new THREE.MeshLambertMaterial({ color: 0xf0e8c8 });
+  const candleFire= new THREE.MeshLambertMaterial({ color: 0xffcc33, emissive: 0xff8800, emissiveIntensity: 1.0 });
+
+  const W = 420*S, H = 620*S, D = 750*S; // room width, height, depth
+
+  // ── Floor — stone tiles ──
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(W, D), stoneDark);
+  floor.rotation.x = -Math.PI/2;
+  scene.add(floor);
+  // tile lines (slightly raised strips)
+  for (let x = -W/2+60*S; x < W/2; x += 60*S) {
+    const line = new THREE.Mesh(new THREE.BoxGeometry(3*S, 1*S, D), stone);
+    line.position.set(x, 0.5*S, 0); scene.add(line);
+  }
+  for (let z = -D/2+60*S; z < D/2; z += 60*S) {
+    const line = new THREE.Mesh(new THREE.BoxGeometry(W, 1*S, 3*S), stone);
+    line.position.set(0, 0.5*S, z); scene.add(line);
+  }
+
+  // ── Walls ──
+  // Back wall (altar end, z = -D/2)
+  const backWall = new THREE.Mesh(new THREE.BoxGeometry(W, H, 20*S), stone);
+  backWall.position.set(0, H/2, -D/2+10*S); scene.add(backWall);
+  // Front wall with door gap — floor1-matched door: FRAME_W=340, FRAME_H=540
+  const dFW = 340*S, dFH = 540*S, dPW = 300*S, dPH = 525*S;
+  const JAMB_W = 25*S;
+  const sideW = (W - dFW)/2 - JAMB_W;
+  const frontL = new THREE.Mesh(new THREE.BoxGeometry(sideW, H, 20*S), stone);
+  frontL.position.set(-(dFW/2 + JAMB_W + sideW/2), H/2, D/2-10*S); scene.add(frontL);
+  const frontR = frontL.clone(); frontR.position.x = dFW/2 + JAMB_W + sideW/2; scene.add(frontR);
+  // Door top fill (above frame height)
+  const frontTop = new THREE.Mesh(new THREE.BoxGeometry(dFW + JAMB_W*2, H - dFH, 20*S), stone);
+  frontTop.position.set(0, dFH + (H - dFH)/2, D/2-10*S); scene.add(frontTop);
+  // Left wall
+  const leftWall = new THREE.Mesh(new THREE.BoxGeometry(20*S, H, D), stone);
+  leftWall.position.set(-W/2+10*S, H/2, 0); scene.add(leftWall);
+  // Right wall
+  const rightWall = leftWall.clone(); rightWall.position.x = W/2-10*S; scene.add(rightWall);
+
+  // ── Entrance doors (rear, z = +D/2) — floor1 dimensions: 340×540 frame, 300×525 panels ──
+  const doorFrame = new THREE.MeshLambertMaterial({ color: 0x050301 });
+  // Jambs
+  const jambL = new THREE.Mesh(new THREE.BoxGeometry(12*S, dFH, JAMB_W), doorFrame);
+  jambL.position.set(-dFW/2 - JAMB_W/2, dFH/2, D/2-10*S); scene.add(jambL);
+  const jambR = jambL.clone(); jambR.position.x = dFW/2 + JAMB_W/2; scene.add(jambR);
+  // Head
+  const headBeam = new THREE.Mesh(new THREE.BoxGeometry(dFW + JAMB_W*2, 25*S, 12*S), doorFrame);
+  headBeam.position.set(0, dFH - 12*S, D/2-8*S); scene.add(headBeam);
+  // Pointed arch above head
+  for (let i = 0; i < 12; i++) {
+    const ang = (i/11)*Math.PI;
+    const ax = Math.cos(ang) * (dFW/2), ay = Math.sin(ang) * 55*S;
+    const ab = new THREE.Mesh(new THREE.BoxGeometry(14*S, 14*S, 14*S), doorFrame);
+    ab.position.set(ax, dFH + ay, D/2-8*S); scene.add(ab);
+  }
+  // Door panels — two leaves each dPW/2 wide
+  [-1,1].forEach(s => {
+    const door = new THREE.Mesh(new THREE.BoxGeometry(dPW/2, dPH, 8*S), wood);
+    door.position.set(s * dPW/4, dPH/2, D/2-6*S); scene.add(door);
+    // Inset panels
+    const panW = dPW/2 - 20*S;
+    [dPH*0.15, dPH*0.45, dPH*0.72].forEach(py => {
+      const panel = new THREE.Mesh(new THREE.BoxGeometry(panW, dPH*0.22, 4*S), woodLight);
+      panel.position.set(s * dPW/4, py, D/2-2*S); scene.add(panel);
+    });
+    // Iron bands
+    [dPH*0.25, dPH*0.5, dPH*0.75, dPH*0.9].forEach(by => {
+      const band = new THREE.Mesh(new THREE.BoxGeometry(dPW/2, 6*S, 5*S), black);
+      band.position.set(s * dPW/4, by, D/2-3*S); scene.add(band);
+    });
+    // Handle
+    const handle = new THREE.Mesh(new THREE.SphereGeometry(6*S, 8, 8), gold);
+    handle.position.set(s*(dPW/4 - 20*S), dPH*0.4, D/2-2*S); scene.add(handle);
+  });
+  // Center divider strip — the meeting edge of the two door leaves
+  const divider = new THREE.Mesh(new THREE.BoxGeometry(5*S, dPH, 10*S), black);
+  divider.position.set(0, dPH/2, D/2-6*S); scene.add(divider);
+
+  // ── Vaulted ceiling — arch segments ──
+  const ceilMat = new THREE.MeshLambertMaterial({ color: 0x5a5248 });
+  // Flat ceiling base
+  const ceilBase = new THREE.Mesh(new THREE.BoxGeometry(W, 15*S, D), ceilMat);
+  ceilBase.position.set(0, H+7*S, 0); scene.add(ceilBase);
+  // Arched ribs across width every 80 units
+  const ribMat = new THREE.MeshLambertMaterial({ color: 0x6a6258 });
+  for (let z = -D/2+80*S; z <= D/2; z += 80*S) {
+    // arch rib as a curved set of boxes
+    const pts = 10;
+    for (let i = 0; i < pts; i++) {
+      const ang = (i / (pts-1)) * Math.PI;
+      const ax = (Math.cos(ang)) * (W/2-15*S);
+      const ay = H + Math.sin(ang) * 60*S;
+      const rib = new THREE.Mesh(new THREE.BoxGeometry(18*S, 18*S, 18*S), ribMat);
+      rib.position.set(ax, ay, z); scene.add(rib);
+    }
+    // Keystones
+    const keystone = new THREE.Mesh(new THREE.BoxGeometry(22*S, 22*S, 18*S), gold);
+    keystone.position.set(0, H+60*S, z); scene.add(keystone);
+  }
+  // Longitudinal ridge beam
+  const ridge = new THREE.Mesh(new THREE.BoxGeometry(14*S, 14*S, D), ribMat);
+  ridge.position.set(0, H+60*S, 0); scene.add(ridge);
+
+  // ── Stained glass windows — left wall ──
+  function makeStainedGlass(cx, cy, cz, rotY, colors) {
+    const g = new THREE.Group();
+    // Stone surround
+    const surround = new THREE.Mesh(new THREE.BoxGeometry(70*S, 110*S, 8*S), stone);
+    g.add(surround);
+    // Panes
+    const paneW = 28*S, paneH = 48*S;
+    [[-16*S, 22*S], [16*S, 22*S], [-16*S, -28*S], [16*S, -28*S]].forEach(([px,py],i) => {
+      const pane = new THREE.Mesh(new THREE.PlaneGeometry(paneW, paneH),
+        new THREE.MeshBasicMaterial({ color: colors[i % colors.length], transparent: true, opacity: 0.85, side: THREE.DoubleSide }));
+      pane.position.set(px, py, 5*S); g.add(pane);
+    });
+    // Pointed arch top pane
+    const top = new THREE.Mesh(new THREE.PlaneGeometry(32*S, 28*S),
+      new THREE.MeshBasicMaterial({ color: colors[0], transparent: true, opacity: 0.85, side: THREE.DoubleSide }));
+    top.position.set(0, 42*S, 5*S); g.add(top);
+    // Leading (cross bars)
+    const lead = new THREE.MeshLambertMaterial({ color: 0x111111 });
+    const hbar = new THREE.Mesh(new THREE.BoxGeometry(60*S, 3*S, 6*S), lead);
+    hbar.position.set(0, 0, 5*S); g.add(hbar);
+    const vbar = new THREE.Mesh(new THREE.BoxGeometry(3*S, 90*S, 6*S), lead);
+    vbar.position.set(0, 0, 5*S); g.add(vbar);
+
+    g.position.set(cx, cy, cz);
+    g.rotation.y = rotY;
+    scene.add(g);
+  }
+
+  // Left wall windows
+  makeStainedGlass(-W/2+12*S, 160*S, -200*S, Math.PI/2, [0x2244cc, 0xcc2222, 0x22aa44, 0xcc8822]);
+  makeStainedGlass(-W/2+12*S, 160*S,  -50*S, Math.PI/2, [0xaa22cc, 0x2266cc, 0xcc4422, 0x22ccaa]);
+  makeStainedGlass(-W/2+12*S, 160*S,  100*S, Math.PI/2, [0x22cc44, 0xcc2244, 0x2244cc, 0xccaa22]);
+  // Right wall windows
+  makeStainedGlass( W/2-12*S, 160*S, -200*S, -Math.PI/2, [0xcc2244, 0x2244cc, 0xccaa22, 0x22aa44]);
+  makeStainedGlass( W/2-12*S, 160*S,  -50*S, -Math.PI/2, [0x2266cc, 0xaa22cc, 0x22ccaa, 0xcc4422]);
+  makeStainedGlass( W/2-12*S, 160*S,  100*S, -Math.PI/2, [0xcc4422, 0x22cc44, 0xccaa22, 0x2244cc]);
+
+  // Rose window — back wall above altar
+  (function() {
+    const g = new THREE.Group();
+    const colors2 = [0x2244cc, 0xcc2222, 0x22aa44, 0xcc8822, 0xaa22cc, 0x22ccaa, 0xcccc22, 0xff4488];
+    for (let i = 0; i < 8; i++) {
+      const ang = (i/8)*Math.PI*2;
+      const pane = new THREE.Mesh(new THREE.PlaneGeometry(28*S, 28*S),
+        new THREE.MeshBasicMaterial({ color: colors2[i], transparent: true, opacity: 0.88, side: THREE.DoubleSide }));
+      pane.position.set(Math.cos(ang)*38*S, Math.sin(ang)*38*S, 12*S); g.add(pane);
+    }
+    // Centre circle
+    const centre = new THREE.Mesh(new THREE.PlaneGeometry(28*S, 28*S),
+      new THREE.MeshBasicMaterial({ color: 0xffd700, transparent: true, opacity: 0.9, side: THREE.DoubleSide }));
+    centre.position.set(0, 0, 12*S); g.add(centre);
+    // Outer ring
+    const ring = new THREE.Mesh(new THREE.BoxGeometry(130*S, 130*S, 10*S), stone);
+    ring.position.set(0,0,0); g.add(ring);
+    // Cut out (fake with dark)
+    const cutout = new THREE.Mesh(new THREE.PlaneGeometry(116*S, 116*S),
+      new THREE.MeshLambertMaterial({ color: 0x111111 }));
+    cutout.position.set(0,0,6*S); g.add(cutout);
+    // Spokes
+    const spoke = new THREE.MeshLambertMaterial({ color: 0x222211 });
+    for (let i = 0; i < 8; i++) {
+      const s = new THREE.Mesh(new THREE.BoxGeometry(3*S, 110*S, 8*S), spoke);
+      s.rotation.z = (i/8)*Math.PI; s.position.z = 8*S; g.add(s);
+    }
+    // Re-add panes on top of spokes
+    for (let i = 0; i < 8; i++) {
+      const ang = (i/8)*Math.PI*2;
+      const pane = new THREE.Mesh(new THREE.PlaneGeometry(24*S, 24*S),
+        new THREE.MeshBasicMaterial({ color: colors2[i], transparent: true, opacity: 0.88, side: THREE.DoubleSide }));
+      pane.position.set(Math.cos(ang)*38*S, Math.sin(ang)*38*S, 13*S); g.add(pane);
+    }
+    const c2 = new THREE.Mesh(new THREE.PlaneGeometry(24*S, 24*S),
+      new THREE.MeshBasicMaterial({ color: 0xffd700, transparent: true, opacity: 0.9, side: THREE.DoubleSide }));
+    c2.position.set(0,0,13*S); g.add(c2);
+
+    g.position.set(0, H-80*S, -D/2+14*S);
+    scene.add(g);
+  })();
+
+  // ── Columns — lining the nave ──
+  const colPositions = [-130*S, -50*S, 30*S, 110*S, 190*S];
+  [-1,1].forEach(side => {
+    colPositions.forEach(cz => {
+      // Column shaft
+      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(14*S, 16*S, H-20*S, 12), stone);
+      shaft.position.set(side*140*S, (H-20*S)/2+10*S, cz); scene.add(shaft);
+      // Base
+      const base2 = new THREE.Mesh(new THREE.BoxGeometry(36*S, 16*S, 36*S), stoneDark);
+      base2.position.set(side*140*S, 8*S, cz); scene.add(base2);
+      // Capital
+      const cap = new THREE.Mesh(new THREE.BoxGeometry(40*S, 20*S, 40*S), stone);
+      cap.position.set(side*140*S, H-10*S, cz); scene.add(cap);
+    });
+  });
+
+  // ── Pews — rows down the nave ──
+  function makePew(x, z) {
+    const g = new THREE.Group();
+    // Seat
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(110*S, 6*S, 38*S), wood);
+    seat.position.set(0, 44*S, 0); g.add(seat);
+    // Back rest
+    const back = new THREE.Mesh(new THREE.BoxGeometry(110*S, 40*S, 5*S), wood);
+    back.position.set(0, 66*S, -18*S); g.add(back);
+    // Legs
+    [-48*S, 48*S].forEach(lx => {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(5*S, 44*S, 38*S), woodLight);
+      leg.position.set(lx, 22*S, 0); g.add(leg);
+      // Carved end panel
+      const end = new THREE.Mesh(new THREE.BoxGeometry(5*S, 70*S, 8*S), woodLight);
+      end.position.set(lx, 35*S, -15*S); g.add(end);
+    });
+    // Kneeler
+    const kneel = new THREE.Mesh(new THREE.BoxGeometry(110*S, 5*S, 20*S), woodLight);
+    kneel.position.set(0, 12*S, 22*S); g.add(kneel);
+    g.position.set(x, 0, z);
+    g.rotation.y = Math.PI;
+    scene.add(g);
+  }
+
+  // Left bank of pews
+  const pewZs = [200*S, 130*S, 60*S, -10*S, -80*S, -150*S, -220*S];
+  pewZs.forEach(pz => {
+    makePew(-80*S, pz);
+    makePew( 80*S, pz);
+  });
+
+  // ── Aisle carpet ──
+  const carpet = new THREE.Mesh(new THREE.BoxGeometry(35*S, 2*S, D-40*S), red);
+  carpet.position.set(0, 1*S, 0); scene.add(carpet);
+
+  // ── Altar platform ──
+  const platform = new THREE.Mesh(new THREE.BoxGeometry(W-40*S, 18*S, 120*S), marble);
+  platform.position.set(0, 9*S, -D/2+70*S); scene.add(platform);
+  const platform2 = new THREE.Mesh(new THREE.BoxGeometry(W-80*S, 10*S, 100*S), marble);
+  platform2.position.set(0, 28*S, -D/2+65*S); scene.add(platform2);
+
+  // ── Altar table ──
+  const altarTop = new THREE.Mesh(new THREE.BoxGeometry(160*S, 8*S, 55*S), marble);
+  altarTop.position.set(0, 70*S, -D/2+80*S); scene.add(altarTop);
+  [-68*S, 68*S].forEach(ax => {
+    [-20*S, 20*S].forEach(az => {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(10*S, 40*S, 10*S), marble);
+      leg.position.set(ax, 48*S, -D/2+80*S+az); scene.add(leg);
+    });
+  });
+  // Altar cloth (white drape)
+  const cloth = new THREE.Mesh(new THREE.BoxGeometry(170*S, 42*S, 4*S), white);
+  cloth.position.set(0, 50*S, -D/2+58*S); scene.add(cloth);
+  const goldTrim = new THREE.Mesh(new THREE.BoxGeometry(170*S, 4*S, 4*S), gold);
+  goldTrim.position.set(0, 30*S, -D/2+58*S); scene.add(goldTrim);
+
+  // ── Crucifix on back wall ──
+  (function() {
+    const g = new THREE.Group();
+    const vert = new THREE.Mesh(new THREE.BoxGeometry(12*S, 140*S, 10*S), woodLight);
+    g.add(vert);
+    const horiz = new THREE.Mesh(new THREE.BoxGeometry(90*S, 12*S, 10*S), woodLight);
+    horiz.position.y = 35*S; g.add(horiz);
+    // Christ figure (simple silhouette)
+    const body = new THREE.Mesh(new THREE.BoxGeometry(8*S, 60*S, 8*S), white);
+    body.position.y = 8*S; g.add(body);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(10*S, 8, 8), white);
+    head.position.y = 46*S; g.add(head);
+    const armL = new THREE.Mesh(new THREE.BoxGeometry(36*S, 6*S, 6*S), white);
+    armL.position.set(-22*S, 35*S, 0); g.add(armL);
+    const armR = armL.clone(); armR.position.x = 22*S; g.add(armR);
+    // Halo
+    const halo = new THREE.Mesh(new THREE.TorusGeometry(14*S, 2*S, 8, 24), gold);
+    halo.position.set(0, 47*S, 2*S); g.add(halo);
+
+    g.position.set(0, 190*S, -D/2+22*S);
+    scene.add(g);
+  })();
+
+  // ── Candles on altar ──
+  function makeCandle(x, y, z) {
+    const g = new THREE.Group();
+    const stick = new THREE.Mesh(new THREE.CylinderGeometry(4*S, 4*S, 35*S, 8), candleWax);
+    stick.position.y = 17*S; g.add(stick);
+    const flame = new THREE.Mesh(new THREE.SphereGeometry(4*S, 6, 6), candleFire);
+    flame.scale.set(0.6, 1.4, 0.6);
+    flame.position.y = 38*S; g.add(flame);
+    // Candle holder base
+    const holder = new THREE.Mesh(new THREE.CylinderGeometry(7*S, 9*S, 6*S, 8), gold);
+    g.add(holder);
+    // Point light from flame
+    const pl = new THREE.PointLight(0xff9922, 1.5, 120*S);
+    pl.position.y = 40*S; g.add(pl);
+    g.position.set(x, y, z);
+    scene.add(g);
+  }
+
+  makeCandle(-55*S, 74*S, -D/2+80*S);
+  makeCandle( 55*S, 74*S, -D/2+80*S);
+  makeCandle(-75*S, 74*S, -D/2+80*S);
+  makeCandle( 75*S, 74*S, -D/2+80*S);
+
+  // Side candelabras
+  [-120*S, 120*S].forEach(cx => {
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(3*S, 5*S, 100*S, 8), gold);
+    pole.position.set(cx, 50*S, -D/2+100*S); scene.add(pole);
+    makeCandle(cx, 102*S, -D/2+100*S);
+    makeCandle(cx-14*S, 96*S, -D/2+100*S);
+    makeCandle(cx+14*S, 96*S, -D/2+100*S);
+  });
+
+  // ── Lectern / pulpit ──
+  (function() {
+    const g = new THREE.Group();
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(6*S, 8*S, 80*S, 8), wood);
+    post.position.y = 40*S; g.add(post);
+    const top2 = new THREE.Mesh(new THREE.BoxGeometry(50*S, 5*S, 35*S), wood);
+    top2.position.y = 84*S; top2.rotation.x = -0.3; g.add(top2);
+    // Eagle (simplified)
+    const eagle = new THREE.Mesh(new THREE.BoxGeometry(30*S, 12*S, 20*S), gold);
+    eagle.position.y = 78*S; g.add(eagle);
+    const base3 = new THREE.Mesh(new THREE.BoxGeometry(30*S, 6*S, 30*S), wood);
+    g.add(base3);
+    g.position.set(-100*S, 38*S, -D/2+150*S);
+    scene.add(g);
+  })();
+
+  // ── Pipe organ (back wall, upper) ──
+  (function() {
+    const g = new THREE.Group();
+    // Case
+    const cas = new THREE.Mesh(new THREE.BoxGeometry(200*S, 130*S, 30*S), woodLight);
+    g.add(cas);
+    // Pipes (vertical cylinders)
+    const pipeHeights = [100,90,80,70,60,50,60,70,80,90,100,90,80,70,60];
+    pipeHeights.forEach((ph, i) => {
+      const pipe = new THREE.Mesh(new THREE.CylinderGeometry(4*S, 4*S, ph*S, 6), stone);
+      pipe.position.set(-90*S + i*13*S, 65*S + (ph-60)*S*0.5, 16*S); g.add(pipe);
+    });
+    // Top decorative arch
+    const arch = new THREE.Mesh(new THREE.BoxGeometry(210*S, 18*S, 28*S), wood);
+    arch.position.y = 74*S; g.add(arch);
+    const archTop = new THREE.Mesh(new THREE.BoxGeometry(200*S, 18*S, 28*S), gold);
+    archTop.position.y = 86*S; g.add(archTop);
+    // Console below
+    const console2 = new THREE.Mesh(new THREE.BoxGeometry(80*S, 50*S, 20*S), wood);
+    console2.position.set(0, -65*S, 20*S); g.add(console2);
+    const keys = new THREE.Mesh(new THREE.BoxGeometry(70*S, 6*S, 15*S), white);
+    keys.position.set(0, -42*S, 28*S); g.add(keys);
+
+    g.position.set(0, H-50*S, -D/2+20*S);
+    scene.add(g);
+  })();
+
+  // ── Wall sconces ──
+  function makeSconce(x, y, z, rotY) {
+    const g = new THREE.Group();
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(20*S, 4*S, 4*S), gold);
+    arm.position.x = 10*S; g.add(arm);
+    const cup = new THREE.Mesh(new THREE.CylinderGeometry(5*S, 3*S, 8*S, 8), gold);
+    cup.position.set(20*S, 0, 0); g.add(cup);
+    const fl = new THREE.Mesh(new THREE.SphereGeometry(4*S, 6, 6), candleFire);
+    fl.scale.set(0.6,1.3,0.6); fl.position.set(20*S, 8*S, 0); g.add(fl);
+    const pl = new THREE.PointLight(0xff8833, 1.2, 100*S);
+    pl.position.set(20*S, 10*S, 0); g.add(pl);
+    g.position.set(x, y, z); g.rotation.y = rotY;
+    scene.add(g);
+  }
+  // Left wall sconces
+  [-200*S, -80*S, 40*S, 160*S, 260*S].forEach(sz => {
+    makeSconce(-W/2+22*S, 130*S, sz, 0);
+  });
+  // Right wall sconces
+  [-200*S, -80*S, 40*S, 160*S, 260*S].forEach(sz => {
+    makeSconce( W/2-22*S, 130*S, sz, Math.PI);
+  });
+}
+
+const exitCooldown = (new URLSearchParams(window.location.search).get('from') === 'floor1') ? Date.now() + 3000 : 0;
+let exitTriggered = false;
+let nearExit = false;
+
+function checkExitDoor() {
+  if (exitTriggered) return;
+  if (Date.now() < exitCooldown) return;
+  nearExit = camera.position.x > -160*SCALE && camera.position.x < 160*SCALE &&
+      camera.position.z > 310*SCALE && camera.position.z < 380*SCALE;
+  const hint = document.getElementById('doorHint');
+  if (hint) hint.style.display = nearExit ? 'block' : 'none';
+}
+
+function updateRotation() {
+  camera.rotation.order = 'YXZ';
+  camera.rotation.set(0, yaw, 0);
+}
+
+function onKeyDown(e) {
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if (e.code === 'KeyE' && nearExit && !exitTriggered) {
+    exitTriggered = true;
+    document.getElementById('doorHint').style.display = 'none';
+    document.getElementById('exitFade').classList.add('show');
+    if(window.SoundSystem)SoundSystem.play('doorOpen');
+    setTimeout(() => window.location.href = 'floor1.html?from=chapel', 600);
+    return;
+  }
+  if (e.code === 'KeyW' || e.code === 'ArrowUp') moveForward = true;
+  if (e.code === 'KeyS' || e.code === 'ArrowDown') moveBackward = true;
+  if (e.code === 'ArrowLeft') turnLeft = true;
+  if (e.code === 'ArrowRight') turnRight = true;
+}
+
+function onKeyUp(e) {
+  if (e.code === 'KeyW' || e.code === 'ArrowUp') moveForward = false;
+  if (e.code === 'KeyS' || e.code === 'ArrowDown') moveBackward = false;
+  if (e.code === 'ArrowLeft') turnLeft = false;
+  if (e.code === 'ArrowRight') turnRight = false;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const delta = (performance.now() - prevTime) / 1000;
+  prevTime = performance.now();
+
+  if (turnLeft) yaw += 2.7 * delta;
+  if (turnRight) yaw -= 2.7 * delta;
+
+  const moveZ = Number(moveForward) - Number(moveBackward);
+  if(moveZ!==0&&window.SoundSystem)SoundSystem.footstep();
+  const speed = 60;
+  const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  camera.position.x += forward.x * moveZ * speed * delta;
+  camera.position.z += forward.z * moveZ * speed * delta;
+
+  camera.position.x = Math.max(-160*SCALE, Math.min(160*SCALE, camera.position.x));
+  camera.position.z = Math.max(-340*SCALE, Math.min(340*SCALE, camera.position.z));
+  camera.position.y = 150*SCALE;
+
+  checkExitDoor();
+  updateRotation();
+  renderer.render(scene, camera);
+  EvidenceSystem.update();
+}
+
+// engine scripts loaded below
+</script>
+<script src="sound-system.js"></script>
+<script src="mystery-engine.js"></script>
+<script src="mystery-state.js"></script>
+<script src="mystery-ui.js"></script>
+<script src="evidence-system.js"></script>
+<script>
+(async () => {
+  await MysteryEngine.init();
+  let scenario = await MysteryState.load();
+  const isNew = !scenario;
+  if (isNew) { scenario = MysteryEngine.generate(); await MysteryState.save(scenario); }
+  window._scenario = scenario;
+  MysteryUI.init(scenario, isNew);
+  MysteryUI.setZone('chapel');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'chapel' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

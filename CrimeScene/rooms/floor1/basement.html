@@ -1,0 +1,1586 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Basement — 3D Tunnels</title>
+<style>
+
+* { margin:0; padding:0; box-sizing:border-box; }
+body { overflow:hidden; background:#000;
+       font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+
+#start-screen {
+  position:fixed; inset:0;
+  background:rgba(0,0,0,0.92);
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  color:#888; text-align:center; z-index:20;
+}
+#start-screen h1 { font-size:20px; letter-spacing:.15em; color:#777; margin-bottom:14px; }
+#start-screen .spec { font-size:12px; color:#444; line-height:2.3; }
+#start-screen .spec b { color:#777; }
+#start-btn {
+  margin-top:26px; padding:10px 32px;
+  background:#111; border:1px solid #333; color:#888;
+  font-family:inherit; font-size:13px; letter-spacing:.07em;
+  border-radius:6px; cursor:pointer;
+}
+#start-btn:hover { background:#1a1a1a; border-color:#555; color:#bbb; }
+
+#crosshair {
+  position:fixed; top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  color:rgba(255,255,255,0.45); font-size:20px;
+  pointer-events:none; display:none; z-index:5;
+  line-height:1;
+}
+#hud {
+  position:fixed; top:14px; left:16px;
+  color:#252525; font-size:11px; letter-spacing:.09em;
+  pointer-events:none; display:none; z-index:5;
+}
+#resume-hint {
+  position:fixed; top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  color:#333; font-size:12px; letter-spacing:.08em;
+  pointer-events:none; display:none; z-index:5;
+}
+#edit-hint {
+  position:fixed; bottom:14px; right:16px;
+  color:#2a2a2a; font-size:10px; letter-spacing:.07em;
+  pointer-events:none; display:none; z-index:5;
+  line-height:1.9;
+  text-align:right;
+}
+  position:fixed; bottom:18%; left:50%;
+  transform:translateX(-50%);
+  background:rgba(0,0,0,0.78);
+  border:1px solid #2a2a2a;
+  color:#d4a84b; font-size:16px; letter-spacing:.1em;
+  padding:8px 22px; border-radius:6px;
+  pointer-events:none; display:none; z-index:6;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+#exit-prompt {
+  position:fixed; bottom:16%; left:50%;
+  transform:translateX(-50%);
+  background:rgba(0,0,0,0.82);
+  border:1px solid #2a2a2a;
+  color:#9fe870; font-size:14px; letter-spacing:.07em;
+  padding:10px 26px; border-radius:6px;
+  pointer-events:none; display:none; z-index:50;
+}
+#fade {
+  position:fixed; inset:0; background:#000;
+  opacity:0; pointer-events:none; z-index:30;
+  transition:opacity 1.3s ease;
+}
+#trans-msg {
+  position:fixed; top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  color:#444; font-size:14px; letter-spacing:.13em;
+  opacity:0; pointer-events:none; z-index:31;
+  transition:opacity 0.7s ease;
+}
+</style>
+</head>
+<body>
+
+
+<div id="start-screen">
+  </div>
+ 
+</div>
+
+<div id="crosshair">·</div>
+<div id="hud">BASEMENT · TUNNEL LEVEL</div>
+<div id="resume-hint">Click to resume</div>
+<div id="dim-hud"></div>
+<div id="exit-prompt">Press <b>E</b> &nbsp;—&nbsp; Exit To Floor 1</div>
+<div id="door-prompt" style="position:fixed;bottom:22%;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.82);border:1px solid #2a2a2a;color:#d4a84b;font-size:13px;letter-spacing:.07em;padding:10px 26px;border-radius:6px;pointer-events:none;display:none;z-index:5;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;"></div>
+<div id="edit-hint">Click a piece to select it</div>
+<div id="fade"></div>
+<div id="trans-msg"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ── Global error display ──────────────────────────────────────────
+window.addEventListener('error', e => {
+  const div = document.createElement('div');
+  div.style.cssText = 'position:fixed;top:0;left:0;right:0;background:red;color:white;font:14px monospace;padding:12px;z-index:9999;white-space:pre-wrap;';
+  div.textContent = '❌ ERROR: ' + e.message + '\nFile: ' + e.filename + '\nLine: ' + e.lineno;
+  document.body.appendChild(div);
+});
+</script>
+<script>
+(() => {
+'use strict';
+
+// ── Specs ─────────────────────────────────────────────────────────
+const FT     = 4;      // 2D pixels per foot
+const TW     = 24;     // tunnel width in 2D px = 6 ft
+const T_H    = 8;      // tunnel height 8 ft
+const EYE_Y  = 5.5;    // eye/camera height ft
+const SPEED = 5;
+
+// ✅ EDIT STEP SIZE (change this number)
+const EDIT_STEP = 0.05; // ← SMALLER = slower, BIGGER = faster
+
+const P_R = 0.7;
+
+const EXIT_R = 35;     // exit trigger radius ft
+const S_T    = 0.06;   // slab thickness ft (walls/floor/ceiling)
+
+// ── Tunnel layout ─────────────────────────────────────────────────
+// Reads saved layout from the 2D design tool; falls back to the default
+const saved = localStorage.getItem('tunnels');
+const TD = saved ? JSON.parse(saved) : [
+  // ── Restored from original map ──────────────────────────────────
+  {x:120,  y:320, w:144, h:TW},   // TD0  — entry from Floor 1
+  {x:240,  y:248, w:TW,  h: 96},  // TD1
+  {x:240,  y:248, w:120, h:TW},   // TD2
+  {x:440,  y: 80, w:TW,  h: 72},  // TD3
+  {x:720,  y:272, w:TW,  h:144},  // TD4
+  {x:440,  y:152, w: 96, h:TW},   // TD5
+  {x:360,  y:248, w:120, h:TW},   // TD6
+  {x:240,  y:344, w:TW,  h:120},  // TD7
+  {x:184,  y:440, w:144, h:TW},   // TD8
+  {x:280,  y:544, w: 96, h:TW},   // TD9
+  {x:360,  y:392, w: 72, h:TW},   // TD10
+  {x:480,  y:248, w:144, h:TW},   // TD11
+  {x:624,  y:248, w:144, h:TW},   // TD12 — exit right end
+  {x:296,  y:104, w:TW,  h:144},  // TD13
+  {x:576,  y:272, w:TW,  h:144},  // TD14
+  {x:536,  y:152, w:TW,  h: 96},  // TD15
+  {x:296,  y: 80, w:144, h:TW},   // TD16
+  {x:600,  y:392, w:144, h:TW},   // TD17
+  {x:656,  y:416, w:TW,  h:144},  // TD18
+  {x:416,  y:272, w:TW,  h:144},  // TD19
+  {x:432,  y:328, w:144, h:TW},   // TD20
+  {x:520,  y:480, w:144, h:TW},   // TD21
+  {x:520,  y:472, w:TW,  h: 96},  // TD22
+  {x:376,  y:544, w:144, h:TW},   // TD23
+  {x:416,  y:416, w:TW,  h:144},  // TD24
+  {x:264,  y:392, w:144, h:TW},   // TD25
+  {x:320,  y:408, w:TW,  h:144},  // TD26
+  {x:160,  y:160, w:144, h:TW},   // TD27
+  {x:160,  y:176, w:TW,  h:144},  // TD28
+  {x:160,  y:320, w:TW,  h:144},  // TD29
+  {x:208,  y:544, w:120, h:TW},   // TD30
+  {x:208,  y:448, w:TW,  h:120},  // TD31
+  {x:720,  y:392, w: 96, h:TW},   // TD32
+  {x:680,  y:536, w:144, h:TW},   // TD33
+  {x:800,  y:392, w:TW,  h:144},  // TD34
+];
+
+// ── Prison cell + its connector tunnel ───────────────────────────
+// Cell footprint (20 ft × 20 ft) hangs off the SOUTH side of TD[8]
+// (the long horizontal tunnel at the bottom of the network).
+// The cell builder rotates the room 180° so the door opens NORTH
+// into the connector, with fixtures lined up against the back wall.
+// Move prison to NORTH (opposite side of tunnels)
+const CELL_RECT = { x: 128, y: 360, w: 80, h: 80, _isCell: true };
+const CONN_RECT = { x: 156, y: 400, w: TW, h: 40, _isConn: true };
+TD.push(CONN_RECT, CELL_RECT);
+
+// Single exit — right end of TD12
+const EXITS = [
+  { x:(624+128)/FT, z:(260+12)/FT, label:'Floor 1' }
+];
+const EXIT_X = (624+128)/FT;
+const EXIT_Z = (260+12)/FT;
+
+// ── Three.js setup ────────────────────────────────────────────────
+const scene    = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+scene.fog        = new THREE.FogExp2(0x000000, 0.012);
+
+const camera   = new THREE.PerspectiveCamera(72, innerWidth/innerHeight, 0.08, 220);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+window._bsmtCamera   = camera;
+window._bsmtScene    = scene;
+window._bsmtRenderer = renderer;
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ── Lighting ──────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xaaaaaa, 1.2)); // visible cave ambience
+const lantern = new THREE.PointLight(0xffddaa, 6, 50, 1); // warm lantern — wide reach
+scene.add(lantern);
+
+// ── Background rock solid ─────────────────────────────────────────
+// A huge dark box rendered from the inside (BackSide).
+// Any tiny geometry gap shows dark rock instead of black void.
+const bgMat = new THREE.MeshStandardMaterial({
+  color: 0x1a1510, roughness: 1, metalness: 0, side: THREE.BackSide
+});
+const bgMesh = new THREE.Mesh(new THREE.BoxGeometry(700, 1200, 700), bgMat);
+bgMesh.position.set(110, 0, 86); // centred over the tunnel network
+scene.add(bgMesh);
+
+// ── Procedural rough rock texture ─────────────────────────────────
+function makeRockTex(seed) {
+  const SZ = 512;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = SZ;
+  const ctx = cv.getContext('2d');
+  let s = (seed * 9301 + 49297) % 233280;
+  const rnd = () => { s = (s * 9301 + 49297) % 233280; return s / 233280; };
+
+  // Very dark near-black base
+  ctx.fillStyle = '#2a2420'; ctx.fillRect(0, 0, SZ, SZ);
+
+  // Angular rock facets — slight tonal variation
+  for (let i = 0; i < 2800; i++) {
+    const v = Math.floor(rnd() * 50 + 20);
+    ctx.fillStyle = `rgb(${v},${Math.floor(v*.87)},${Math.floor(v*.74)})`;
+    ctx.save();
+    ctx.translate(rnd()*SZ, rnd()*SZ);
+    ctx.rotate(rnd()*Math.PI);
+    ctx.fillRect(-(rnd()*11+2), -(rnd()*8+1.5), rnd()*22+4, rnd()*16+3);
+    ctx.restore();
+  }
+  // Dark cracks
+  for (let i = 0; i < 42; i++) {
+    ctx.strokeStyle = `rgba(0,0,0,${.42+rnd()*.44})`;
+    ctx.lineWidth = rnd()*1.8+0.3;
+    ctx.beginPath(); ctx.moveTo(rnd()*SZ, rnd()*SZ);
+    for (let j = 0; j < 5; j++) ctx.lineTo(rnd()*SZ, rnd()*SZ);
+    ctx.stroke();
+  }
+  // Faint mineral seams
+  for (let i = 0; i < 12; i++) {
+    ctx.strokeStyle = `rgba(30,24,16,${.22+rnd()*.28})`;
+    ctx.lineWidth = rnd()*.8+.2;
+    ctx.beginPath(); ctx.moveTo(rnd()*SZ, rnd()*SZ);
+    for (let j = 0; j < 4; j++) ctx.lineTo(rnd()*SZ, rnd()*SZ);
+    ctx.stroke();
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+const wTex = makeRockTex(42);  wTex.repeat.set(3, 2.6);
+const fTex = makeRockTex(137); fTex.repeat.set(5, 5);
+
+const wallMat  = new THREE.MeshStandardMaterial({ map:wTex, color:0x666055, roughness:1, metalness:0 });
+const floorMat = new THREE.MeshStandardMaterial({ map:fTex, color:0x554e44, roughness:1, metalness:0 });
+
+// ── Geometry helpers ──────────────────────────────────────────────
+function slab(sx, sy, sz, px, py, pz, mat) {
+const m = new THREE.Mesh(new THREE.BoxGeometry(sx, sy, sz), mat);
+m.position.set(px, py, pz);
+
+// ✅ STABLE UNIQUE ID (fixes saving)
+// (Don’t reset the counter every time; preserve across slabs)
+window.__wallIdCounter = window.__wallIdCounter || 0;
+
+m.userData = m.userData || {};
+if (!m.userData.editId) {
+  // Stable ID based on geometry + position so IDs don't shift when tunnel count changes
+  m.userData.editId = 'bsmt_' + [sx,sy,sz,px,py,pz].map(v=>Math.round(v*100)).join('_');
+}
+m.userData.rotSteps = m.userData.rotSteps || 0;
+// Cache original geometry dims so they survive geometry.dispose()
+m.userData._gw = sx;
+m.userData._gh = sy;
+m.userData._gd = sz;
+
+scene.add(m);
+
+// ✅ REGISTER FOR EDITING (Don’t overwrite the array each time)
+window.editableObjects = window.editableObjects || [];
+window.editableObjects.push(m);
+return m;
+}
+
+// Build wall segments that run in X at a fixed Z plane,
+// automatically cutting openings where other tunnels pass through.
+function wallAlongX(rect, planeZ, xL, xR) {
+
+  const SEAL = 0.1; // small corner fill — doesn't protrude visibly
+
+  const gaps = [];
+  TD.forEach(o => {
+    if (o === rect) return;
+    const ozL = o.y/FT, ozR = (o.y+o.h)/FT;
+    if (planeZ < ozL || planeZ > ozR) return;
+
+    const ol = Math.max(o.x/FT, xL);
+    const or_ = Math.min((o.x+o.w)/FT, xR);
+    if (ol < or_) gaps.push({l:ol, r:or_});
+  });
+
+  gaps.sort((a,b)=>a.l-b.l);
+
+  let cur = xL;
+  for (const g of gaps) {
+    if (cur < g.l) {
+      slab((g.l - cur) + SEAL, T_H, S_T,
+        (cur + g.l)/2 + SEAL/2, T_H/2, planeZ, wallMat);
+    }
+    cur = Math.max(cur, g.r);
+  }
+
+  if (cur < xR) {
+    slab((xR - cur) + SEAL, T_H, S_T,
+      (cur + xR)/2 - SEAL/2, T_H/2, planeZ, wallMat);
+  }
+}
+
+// Build wall segments that run in Z at a fixed X plane,
+// automatically cutting openings where other tunnels pass through.
+function wallAlongZ(rect, planeX, zL, zR) {
+
+  const SEAL = 0.1; // small corner fill
+
+  const gaps = [];
+  TD.forEach(o => {
+    if (o === rect) return;
+    const oxL = o.x/FT, oxR = (o.x+o.w)/FT;
+    if (planeX < oxL || planeX > oxR) return;
+
+    const ol = Math.max(o.y/FT, zL);
+    const or_ = Math.min((o.y+o.h)/FT, zR);
+    if (ol < or_) gaps.push({l:ol, r:or_});
+  });
+
+  gaps.sort((a,b)=>a.l-b.l);
+
+  let cur = zL;
+  for (const g of gaps) {
+    if (cur < g.l) {
+      slab(S_T, T_H, (g.l - cur) + SEAL, planeX, T_H/2, (cur + g.l)/2 + SEAL/2, wallMat);
+    }
+    cur = Math.max(cur, g.r);
+  }
+
+  if (cur < zR) {
+    slab(S_T, T_H, (zR - cur) + SEAL, planeX, T_H/2, (cur + zR)/2 - SEAL/2, wallMat);
+  }
+}
+
+// ── End caps — close open tunnel dead ends ────────────────────────
+function addEndCaps() {
+  const hw = 3;
+  TD.forEach(r => {
+    if (r._isCell) return; // no rock cap on the cell itself
+    const isH = r.w > r.h;
+    const cx  = (r.x + r.w / 2) / FT;
+    const cz  = (r.y + r.h / 2) / FT;
+    const lx  = r.w / FT;
+    const lz  = r.h / FT;
+    function connected(ex, ez, axis) {
+      return TD.some(t => {
+        if (t === r) return false;
+        const txL = t.x/FT, txR = (t.x+t.w)/FT;
+        const tzL = t.y/FT, tzR = (t.y+t.h)/FT;
+        return axis === 'x'
+          ? txL <= ex && txR >= ex && tzL < ez+hw && tzR > ez-hw
+          : tzL <= ez && tzR >= ez && txL < ex+hw && txR > ex-hw;
+      });
+    }
+    if (isH) {
+      if (!connected(cx - lx/2, cz, 'x')) slab(S_T, T_H, 6, cx-lx/2, T_H/2, cz, wallMat);
+      if (!connected(cx + lx/2, cz, 'x')) slab(S_T, T_H, 6, cx+lx/2, T_H/2, cz, wallMat);
+    } else {
+      if (!connected(cx, cz - lz/2, 'z')) slab(6, T_H, S_T, cx, T_H/2, cz-lz/2, wallMat);
+      if (!connected(cx, cz + lz/2, 'z')) slab(6, T_H, S_T, cx, T_H/2, cz+lz/2, wallMat);
+    }
+  });
+}
+
+// Snap all TD coords to integers to fix wall junction gaps
+TD.forEach(r => {
+  r.x = Math.round(r.x);
+  r.y = Math.round(r.y);
+  r.w = Math.round(r.w);
+  r.h = Math.round(r.h);
+});
+
+// ── Build all tunnel geometry ──────────────────────────────────────
+TD.forEach(r => {
+  if (r._isCell) return;
+  const isH = r.w > r.h; // horizontal if wider than tall
+  const cx = (r.x + r.w/2) / FT;
+  const cz = (r.y + r.h/2) / FT;
+  const lx = r.w / FT;
+  const lz = r.h / FT;
+  const hw = (isH ? r.h : r.w) / FT / 2; // half tunnel width
+
+  slab(lx, S_T, lz, cx, 0, cz, floorMat);
+  slab(lx, S_T, lz, cx, T_H, cz, floorMat);
+
+  if (isH) {
+    wallAlongX(r, cz - hw, cx - lx/2, cx + lx/2);
+    wallAlongX(r, cz + hw, cx - lx/2, cx + lx/2);
+  } else {
+    wallAlongZ(r, cx - hw, cz - lz/2, cz + lz/2);
+    wallAlongZ(r, cx + hw, cz - lz/2, cz + lz/2);
+  }
+});
+
+addEndCaps();
+buildPrisonCell();
+
+
+
+// ── Prison cell construction ──────────────────────────────────────
+function buildPrisonCell() {
+  // World position of cell center
+  const cxC_w = (CELL_RECT.x + CELL_RECT.w/2) / FT;
+  const czC_w = (CELL_RECT.y + CELL_RECT.h/2) / FT;
+  const W = CELL_RECT.w / FT;          // 20
+  const D = CELL_RECT.h / FT;          // 20
+  const CH  = 10;                      // 10 ft ceiling
+
+  // Local cell bounds (centered at origin). Door is built on the +Z wall in local
+  // space; we rotate the wrapper group so the door ends up facing world -Z
+  // (i.e., toward the connector corridor heading north back to TD[8]).
+  const xL = -W/2, xR = W/2;
+  const zL = -D/2, zR = D/2;
+  const cxC = 0, czC = 0;
+
+  // Stainless / concrete palette
+  const steel       = new THREE.MeshStandardMaterial({ color:0xb8bcc2, metalness:0.95, roughness:0.32 });
+  const steelDark   = new THREE.MeshStandardMaterial({ color:0x8a8e94, metalness:0.95, roughness:0.42 });
+  const steelBright = new THREE.MeshStandardMaterial({ color:0xd0d4da, metalness:0.98, roughness:0.22 });
+  const concreteMat = new THREE.MeshStandardMaterial({ color:0x3a3d40, metalness:0,    roughness:0.95 });
+  const padMat      = new THREE.MeshStandardMaterial({ color:0x4a3a2c, metalness:0,    roughness:0.9  });
+  const sheetMat    = new THREE.MeshStandardMaterial({ color:0xc9c2b3, metalness:0,    roughness:0.85 });
+  const darkInsetMat= new THREE.MeshStandardMaterial({ color:0x101214, metalness:0,    roughness:0.95 });
+
+  // Wrapper group — positioned at world cell center, rotated 180° around Y so
+  // local +Z (door side) faces world -Z (toward corridor / tunnels).
+  const cell = new THREE.Group();
+  cell.position.set(cxC_w, 0, czC_w);
+  cell.rotation.y = 0;
+  scene.add(cell);
+
+  // ── Floor + ceiling slabs ──
+  const floorSlab = new THREE.Mesh(new THREE.BoxGeometry(W, 0.25, D), concreteMat);
+  floorSlab.position.set(0, 0.125, 0); cell.add(floorSlab);
+  const ceilSlab  = new THREE.Mesh(new THREE.BoxGeometry(W, 0.25, D), concreteMat);
+  ceilSlab.position.set(0, CH + 0.125, 0); cell.add(ceilSlab);
+
+  // Floor drain
+  const drain = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.06, 24), steelDark);
+  drain.position.set(-2, 0.26, 1); cell.add(drain);
+  for (let i = -3; i <= 3; i++) {
+    const slit = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.02, 0.06), steelDark);
+    slit.position.set(-2, 0.29, 1 + i * 0.1); cell.add(slit);
+  }
+
+  // ── Bars ──
+  const BAR_R = 0.06, RAIL_R = 0.09, BAR_SPACING = 0.42;
+  const barH = CH - 0.1;
+  const barY = barH / 2 + 0.2;
+  const railHs = [0.5, CH * 0.5, CH - 0.3];
+
+  function addBar(x, z) {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(BAR_R, BAR_R, barH, 12), steel);
+    m.position.set(x, barY, z); cell.add(m);
+  }
+  function addRail(x1, z1, x2, z2, y) {
+    const len = Math.hypot(x2 - x1, z2 - z1);
+    if (len < 0.1) return;
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(RAIL_R, RAIL_R, len, 14), steelDark);
+    m.position.set((x1 + x2)/2, y, (z1 + z2)/2);
+    m.rotation.z = Math.PI / 2;
+    m.rotation.y = -Math.atan2(z2 - z1, x2 - x1);
+    cell.add(m);
+  }
+  function barRun(x1, z1, x2, z2) {
+    const dx = x2 - x1, dz = z2 - z1;
+    const len = Math.hypot(dx, dz);
+    const dirX = dx / len, dirZ = dz / len;
+    const n = Math.floor(len / BAR_SPACING);
+    const off = (len - n * BAR_SPACING) / 2;
+    for (let i = 0; i <= n; i++) {
+      const t = off + i * BAR_SPACING;
+      addBar(x1 + dirX * t, z1 + dirZ * t);
+    }
+    for (const h of railHs) addRail(x1, z1, x2, z2, h);
+  }
+
+  // Door geometry (centered on +Z wall in local space)
+  const DOOR_W   = 3.2;
+  const doorXL   = cxC - DOOR_W / 2;
+  const doorXR   = cxC + DOOR_W / 2;
+
+  // -Z wall (back, full bars)
+  barRun(xL, zL, xR, zL);
+  // -X wall (left, full bars)
+  barRun(xL, zL, xL, zR);
+  // +X wall (right, full bars)
+  barRun(xR, zL, xR, zR);
+  // +Z wall (front) — bars left and right of door opening
+  barRun(xL,    zR, doorXL, zR);
+  barRun(doorXR, zR, xR,    zR);
+
+  // Thicker door-frame uprights flanking the gap
+  for (const x of [doorXL, doorXR]) {
+    const up = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, CH - 0.1, 16), steelDark);
+    up.position.set(x, (CH - 0.1)/2 + 0.2, zR); cell.add(up);
+  }
+
+  // ── Door (group hinged on left jamb, swung 75° open into the corridor) ──
+  const door = new THREE.Group();
+  const DH   = CH - 0.6;
+  const dfT  = 0.09;
+  const dfL2 = new THREE.Mesh(new THREE.BoxGeometry(dfT, DH, dfT), steelDark); door.add(dfL2);
+  const dfR2 = new THREE.Mesh(new THREE.BoxGeometry(dfT, DH, dfT), steelDark); dfR2.position.set(DOOR_W - dfT, 0, 0); door.add(dfR2);
+  const dfTop= new THREE.Mesh(new THREE.BoxGeometry(DOOR_W, dfT, dfT), steelDark); dfTop.position.set(DOOR_W/2 - dfT/2,  DH/2 - dfT/2, 0); door.add(dfTop);
+  const dfBot= new THREE.Mesh(new THREE.BoxGeometry(DOOR_W, dfT, dfT), steelDark); dfBot.position.set(DOOR_W/2 - dfT/2, -DH/2 + dfT/2, 0); door.add(dfBot);
+
+  const dBars = Math.floor((DOOR_W - 0.2) / BAR_SPACING);
+  const dOff  = (DOOR_W - dBars * BAR_SPACING) / 2;
+  for (let i = 0; i <= dBars; i++) {
+    const b = new THREE.Mesh(new THREE.CylinderGeometry(BAR_R, BAR_R, DH - 0.2, 12), steel);
+    b.position.set(dOff + i * BAR_SPACING, 0, 0); door.add(b);
+  }
+  for (const yy of [-DH*0.35, 0, DH*0.35]) {
+    const r = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, DOOR_W - 0.2, 12), steelDark);
+    r.rotation.z = Math.PI/2; r.position.set(DOOR_W/2, yy, 0); door.add(r);
+  }
+  // Lock + keyhole
+  const lockPlate = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.9, 0.18), steelBright);
+  lockPlate.position.set(DOOR_W - 0.45, 0, 0.12); door.add(lockPlate);
+  const lockBar = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.25, 16), steelBright);
+  lockBar.rotation.x = Math.PI/2; lockBar.position.set(DOOR_W - 0.45, 0, 0.28); door.add(lockBar);
+  const keyhole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.05, 12), darkInsetMat);
+  keyhole.rotation.x = Math.PI/2; keyhole.position.set(DOOR_W - 0.45, 0, 0.41); door.add(keyhole);
+  // Hinges
+  for (const yy of [-DH*0.4, DH*0.4]) {
+    const h = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.35, 14), steelBright);
+    h.position.set(0, yy, 0); door.add(h);
+  }
+  // Pivot at the left jamb, swing 75° outward (+Z in local — out toward the corridor after the parent group rotates)
+  door.position.set(doorXL + dfT/2, DH/2 + 0.3, zR);
+  door.rotation.y = 0; // closed by default
+  cell.add(door);
+
+  // Expose door for E-key toggling
+  window.prisonDoor = door;
+  window.prisonDoorOpen = false;
+  window.prisonDoorWorldPos = { x: cxC_w, z: czC_w }; // cell center in world
+
+  // ── Bunks (against -X wall in local space, stacked) ──
+  function makeBunk(yPlat) {
+    const g = new THREE.Group();
+    const bedL = 6.5, bedW = 3.0, bedT = 0.2;
+    const plat = new THREE.Mesh(new THREE.BoxGeometry(bedW, bedT, bedL), steelDark);
+    plat.position.set(0, yPlat, 0); g.add(plat);
+    const mount = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.3, bedL - 0.4), steelDark);
+    mount.position.set(-bedW/2 - 0.05, yPlat, 0); g.add(mount);
+    for (const zz of [-bedL/2 + 0.3, bedL/2 - 0.3]) {
+      const br = new THREE.Mesh(new THREE.BoxGeometry(bedW + 0.1, 0.15, 0.25), steelDark);
+      br.position.set(0, yPlat - bedT/2 - 0.07, zz); g.add(br);
+    }
+    const mat = new THREE.Mesh(new THREE.BoxGeometry(bedW - 0.2, 0.18, bedL - 0.2), padMat);
+    mat.position.set(0, yPlat + bedT/2 + 0.09, 0); g.add(mat);
+    const folded = new THREE.Mesh(new THREE.BoxGeometry(bedW - 0.3, 0.12, 0.9), sheetMat);
+    folded.position.set(0, yPlat + bedT/2 + 0.15, bedL/2 - 0.7); g.add(folded);
+    const pillow = new THREE.Mesh(new THREE.BoxGeometry(bedW - 0.6, 0.22, 1.4), sheetMat);
+    pillow.position.set(0, yPlat + bedT/2 + 0.18, -bedL/2 + 0.95); g.add(pillow);
+    return g;
+  }
+  const beds = new THREE.Group();
+  beds.position.set(xL + 1.6, 0, 0);
+  beds.add(makeBunk(1.5));   // lower bunk
+  beds.add(makeBunk(5.2));   // upper bunk
+  // Ladder
+  for (let i = 0; i < 4; i++) {
+    const rung = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.0, 10), steelBright);
+    rung.rotation.z = Math.PI / 2;
+    rung.position.set(0.8, 2.0 + i * 0.7, 2.6); beds.add(rung);
+  }
+  for (const xx of [0.3, 1.3]) {
+    const r = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 3.6, 10), steelBright);
+    r.position.set(xx + 0.5, 2.8, 2.6); beds.add(r);
+  }
+  cell.add(beds);
+
+  // ── Toilet / sink combi unit (against the -Z back wall, +X corner) ──
+  const combi = new THREE.Group();
+  combi.position.set(xR - 2.2, 0, zL + 1.8);
+  const panel = new THREE.Mesh(new THREE.BoxGeometry(2.2, 4.2, 0.25), steelDark);
+  panel.position.set(0, 2.1, -0.9); combi.add(panel);
+  const tBase = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.3, 1.4), steel);
+  tBase.position.set(0, 0.65, 0); combi.add(tBase);
+  const tTrim = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.12, 1.2), steelBright);
+  tTrim.position.set(0, 1.36, 0); combi.add(tTrim);
+  const bowl = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.4, 0.6, 20), darkInsetMat);
+  bowl.position.set(0, 1.0, 0); bowl.scale.set(1.05, 1, 0.78); combi.add(bowl);
+  const sBasin = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.5, 1.0), steel);
+  sBasin.position.set(0, 3.0, -0.35); combi.add(sBasin);
+  const sInner = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.35, 0.7),
+    new THREE.MeshStandardMaterial({ color:0x6a6e74, metalness:0.95, roughness:0.5 }));
+  sInner.position.set(0, 3.16, -0.35); combi.add(sInner);
+  const fbBase = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.25, 14), steelBright);
+  fbBase.position.set(0, 3.35, -0.85); combi.add(fbBase);
+  const fbNeck = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.7, 12), steelBright);
+  fbNeck.position.set(0, 3.7, -0.85); combi.add(fbNeck);
+  const fbSpout = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.45, 12), steelBright);
+  fbSpout.rotation.x = Math.PI/2; fbSpout.position.set(0, 4.0, -0.65); combi.add(fbSpout);
+  for (const [px, pz, py] of [[-0.6,-0.95,3.25],[0.6,-0.95,3.25],[0,-0.92,2.0]]) {
+    const btn = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.05, 14), steelBright);
+    btn.rotation.x = Math.PI/2; btn.position.set(px, py, pz); combi.add(btn);
+  }
+  cell.add(combi);
+
+  // ── Wall sink (back wall, -X side of combi) ──
+  const sinkG = new THREE.Group();
+  sinkG.position.set(-2.5, 0, zL + 0.6);
+  const basin = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.45, 1.3), steel);
+  basin.position.set(0, 3.2, 0); sinkG.add(basin);
+  const well = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.3, 0.95),
+    new THREE.MeshStandardMaterial({ color:0x70757b, metalness:0.95, roughness:0.45 }));
+  well.position.set(0, 3.38, 0); sinkG.add(well);
+  const splash = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.9, 0.12), steelDark);
+  splash.position.set(0, 3.7, -0.65); sinkG.add(splash);
+  for (const xx of [-0.95, 0.95]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 3.0, 10), steelDark);
+    leg.position.set(xx, 1.5, 0.4); sinkG.add(leg);
+  }
+  const fA = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.45, 12), steelBright);
+  fA.position.set(0, 3.7, -0.5); sinkG.add(fA);
+  const fB = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.55, 12), steelBright);
+  fB.rotation.x = Math.PI/2; fB.position.set(0, 3.9, -0.25); sinkG.add(fB);
+  const mirror = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 0.05, 32),
+    new THREE.MeshStandardMaterial({ color:0x9aa0a8, metalness:1, roughness:0.05 }));
+  mirror.rotation.x = Math.PI/2; mirror.position.set(0, 5.4, -0.62); sinkG.add(mirror);
+  const mRing = new THREE.Mesh(new THREE.TorusGeometry(0.6, 0.05, 8, 40), steelDark);
+  mRing.position.set(0, 5.4, -0.6); sinkG.add(mRing);
+  cell.add(sinkG);
+
+  // ── Ceiling cage light ──
+  const housing = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.18, 24), steelDark);
+  housing.position.set(0, CH - 0.05, 0); cell.add(housing);
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.28, 20, 16),
+    new THREE.MeshStandardMaterial({ color:0xfff1c8, emissive:0xffd58a, emissiveIntensity:2.6, roughness:0.4 }));
+  bulb.position.set(0, CH - 0.45, 0); cell.add(bulb);
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    const w = new THREE.Mesh(new THREE.TorusGeometry(0.45, 0.015, 6, 24, Math.PI), steelDark);
+    w.rotation.y = a; w.rotation.x = Math.PI / 2;
+    w.position.set(0, CH - 0.45, 0); cell.add(w);
+  }
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.45, 0.02, 8, 32), steelDark);
+  ring.rotation.x = Math.PI / 2; ring.position.set(0, CH - 0.7, 0); cell.add(ring);
+
+  // Cell point light (visible from corridor — gives the cell a warm glow).
+  // Light goes into the WORLD (not the rotated group) so its position is in world coords.
+  const cellLight = new THREE.PointLight(0xffd6a0, 4.5, 38, 1.6);
+  cellLight.position.set(cxC_w, CH - 0.55, czC_w);
+  scene.add(cellLight);
+
+  // Subtle flicker
+  let flickT = 0;
+  (function flick() {
+    flickT += 0.016;
+    const f = 1 + Math.sin(flickT * 7.3) * 0.04 + Math.sin(flickT * 23.1) * 0.02;
+    cellLight.intensity = 4.5 * f;
+    bulb.material.emissiveIntensity = 2.6 * f;
+    requestAnimationFrame(flick);
+  })();
+}
+
+// ── Prison direction sign ─────────────────────────────────────────
+function buildPrisonSign() {
+  const cv  = document.createElement('canvas');
+  cv.width  = 512; cv.height = 192;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#1a1f1a';
+  ctx.fillRect(0, 0, 512, 192);
+  ctx.strokeStyle = '#4a6a4a'; ctx.lineWidth = 6;
+  ctx.strokeRect(6, 6, 500, 180);
+  ctx.strokeStyle = '#2e4a2e'; ctx.lineWidth = 2;
+  ctx.strokeRect(14, 14, 484, 164);
+  ctx.fillStyle = '#7ab87a';
+  ctx.font = 'bold 88px monospace'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  ctx.fillText('↓', 28, 96);
+  ctx.fillStyle = '#9fe870';
+  ctx.font = 'bold 48px monospace';
+  ctx.fillText('CELL BLOCK', 110, 72);
+  ctx.fillStyle = '#4a7a4a';
+  ctx.font = '26px monospace';
+  ctx.fillText('RESTRICTED AREA', 110, 128);
+  const tex = new THREE.CanvasTexture(cv);
+  const plateMat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.5, metalness: 0.7 });
+  const plate = new THREE.Mesh(new THREE.BoxGeometry(3.0, 1.1, 0.06), plateMat);
+  const bracketMat = new THREE.MeshStandardMaterial({ color: 0x2a3a2a, metalness: 0.9, roughness: 0.3 });
+  const bTop = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.1, 0.12), bracketMat);
+  const bBot = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.1, 0.12), bracketMat);
+  bTop.position.y = 0.6; bBot.position.y = -0.6;
+  const boltMat = new THREE.MeshStandardMaterial({ color: 0x8a9a8a, metalness: 1, roughness: 0.2 });
+  const boltGeo = new THREE.CylinderGeometry(0.055, 0.055, 0.09, 10);
+  [[-1.35,0.45],[1.35,0.45],[-1.35,-0.45],[1.35,-0.45]].forEach(([bx,by]) => {
+    const bolt = new THREE.Mesh(boltGeo, boltMat);
+    bolt.rotation.x = Math.PI/2; bolt.position.set(bx, by, 0.075); plate.add(bolt);
+  });
+  const sign = new THREE.Group();
+  sign.add(plate); sign.add(bTop); sign.add(bBot);
+  const signX = (CONN_RECT.x + CONN_RECT.w/2) / FT;
+  const signZ = (CELL_RECT.y) / FT - 0.08;   // north wall of the cell, facing up the connector
+  sign.position.set(signX, 34, signZ);
+  scene.add(sign);
+}
+buildPrisonSign();
+
+// ── Floor arrow trail: player start → prison ─────────────────────
+(function buildArrowTrail() {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 128;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, 128, 128);
+  ctx.fillStyle = 'rgba(158,232,112,0.88)';
+  ctx.beginPath();
+  ctx.moveTo(64,  8);
+  ctx.lineTo(104, 60); ctx.lineTo(78, 60);
+  ctx.lineTo(78, 118); ctx.lineTo(50, 118);
+  ctx.lineTo(50,  60); ctx.lineTo(24, 60);
+  ctx.closePath();
+  ctx.fill();
+  const tex = new THREE.CanvasTexture(cv);
+
+  function arrow(wx, wz, rotZ) {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.85, 0.85),
+      new THREE.MeshStandardMaterial({
+        map: tex, transparent: true, opacity: 0.9,
+        roughness: 0.8, metalness: 0, depthWrite: false,
+        emissive: new THREE.Color(0x3a7a10), emissiveIntensity: 0.5
+      })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.rotation.z = rotZ;
+    m.position.set(wx, 0.03, wz);
+    scene.add(m);
+  }
+
+  // rotZ values for PlaneGeometry lying flat:
+  // 0        = arrow points toward -Z (north)
+  // Math.PI  = arrow points toward +Z (south)
+  // PI/2     = arrow points toward -X (west)
+  // -PI/2    = arrow points toward +X (east)
+  const WEST  =  Math.PI / 2;
+  const SOUTH =  Math.PI;
+  const GAP   = 9; // ft between arrows
+
+  function arrowsH(xStartPx, xEndPx, yCentrePx) {
+    const z   = yCentrePx / FT;
+    const x0  = xStartPx  / FT;
+    const x1  = xEndPx    / FT;
+    const dir = x1 < x0 ? -1 : 1;
+    const rot = dir < 0 ? WEST : -WEST;
+    for (let x = x0 + dir * GAP; dir < 0 ? x > x1 : x < x1; x += dir * GAP)
+      arrow(x, z, rot);
+  }
+
+  function arrowsV(xCentrePx, yStartPx, yEndPx) {
+    const x   = xCentrePx / FT;
+    const z0  = yStartPx  / FT;
+    const z1  = yEndPx    / FT;
+    const dir = z1 < z0 ? -1 : 1;
+    const rot = dir > 0 ? SOUTH : 0;
+    for (let z = z0 + dir * GAP; dir > 0 ? z < z1 : z > z1; z += dir * GAP)
+      arrow(x, z, rot);
+  }
+
+  // Route: TD[12] → TD[11] → TD[6] → TD[1](vertical) → TD[0] → CONN(vertical)
+  arrowsH(768 - 18, 624,      260 + TW/2);   // TD[12] going west
+  arrowsH(624,      480,      260 + TW/2);   // TD[11] going west
+  arrowsH(480,      360,      248 + TW/2);   // TD[6]  going west
+  arrowsV(240 + TW/2, 248,    344          ); // TD[1]  going south
+  arrowsH(264,      120 + 18, 320 + TW/2);   // TD[0]  going west
+  arrowsV(156 + TW/2, 400,    438          ); // CONN   going south
+})();
+
+// ===== NEON EXIT SIGN =====
+(function() {
+  const wx = 191.5, wy = 4.5, wz = 68;
+
+  const cv = document.createElement('canvas');
+  cv.width = 1024; cv.height = 256;
+  const ctx = cv.getContext('2d');
+
+  ctx.fillStyle = '#001a11';
+  ctx.fillRect(0, 0, 1024, 256);
+  ctx.strokeStyle = '#00ff99'; ctx.lineWidth = 8;
+  ctx.strokeRect(8, 8, 1008, 240);
+
+  ctx.font = 'bold 180px Arial';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = '#00ffaa';
+  ctx.shadowBlur = 40;
+  ctx.fillStyle = '#00ffaa';
+  ctx.fillText('EXIT', 512, 128);
+  ctx.shadowBlur = 20;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText('EXIT', 512, 128);
+
+  const tex = new THREE.CanvasTexture(cv);
+  tex.anisotropy = 16;
+  const mat = new THREE.MeshBasicMaterial({ map: tex });
+  const sign = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1.2, 3.2), mat);
+  sign.position.set(wx, wy, wz);
+
+  sign.userData.editId = 'neon_exit_sign';
+  window.editableObjects = window.editableObjects || [];
+  window.editableObjects.push(sign);
+  scene.add(sign);
+})();
+// ===== END NEON EXIT SIGN =====
+
+// ── Apply saved edits after ALL geometry is built ─────────────────
+{
+  const saved = JSON.parse(localStorage.getItem("basement_edits") || "{}");
+  let applied = 0;
+  (window.editableObjects || []).forEach(o => {
+    const d = saved[o.userData.editId];
+    if (!d) return;
+    applied++;
+    o.position.set(d.x, d.y, d.z);
+    o.scale.set(d.sx, d.sy, d.sz);
+    o.userData.rotSteps = d.rotSteps || 0;
+  });
+  console.log('🟢 Applied', applied, 'saved edits');
+}
+
+// ── Save All button ───────────────────────────────────────────────
+window.saveAllEdits = function() {
+  const data = {};
+  (window.editableObjects || []).forEach(o => {
+    if (!o.userData.editId) return;
+    const g = o.geometry.parameters || {};
+    const gw = g.width  !== undefined ? g.width  : o.userData._gw;
+    const gh = g.height !== undefined ? g.height : o.userData._gh;
+    const gd = g.depth  !== undefined ? g.depth  : o.userData._gd;
+    data[o.userData.editId] = {
+      x: o.position.x, y: o.position.y, z: o.position.z,
+      sx: o.scale.x, sy: o.scale.y, sz: o.scale.z,
+      gw, gh, gd,
+      rotSteps: o.userData.rotSteps || 0
+    };
+  });
+  try {
+    localStorage.setItem('basement_edits', JSON.stringify(data));
+    const count = Object.keys(data).length;
+    console.log('💾 Saved all', count, 'objects to basement_edits');
+    const hud = document.getElementById('dim-hud');
+    hud.textContent = '💾 Saved ' + count + ' objects';
+    hud.style.display = 'block';
+    setTimeout(() => { hud.style.display = 'none'; }, 2500);
+  } catch(e) {
+    alert('Save failed: ' + e.message);
+  }
+};
+
+// Save All button removed
+
+const tLast = TD[12];
+
+// ══════════════════════════════════════════════════
+// SPAWN POSITIONS — change these numbers to move the player
+// ══════════════════════════════════════════════════
+
+// DEFAULT SPAWN (when opening basement.html directly)
+let startX   = 187.5;  // ← change to move LEFT / RIGHT
+let startZ   = 65.5;     // ← change to move FORWARD / BACK
+let startYaw = Math.PI/2;
+
+// FROM FLOOR 1 SPAWN (when coming through secret door)
+if (new URLSearchParams(window.location.search).get('from') === 'floor1') {
+  startX   = 34.5;    // ← change to move LEFT / RIGHT
+  startZ   = 83;      // ← change to move FORWARD / BACK
+  startYaw = 0;
+}
+
+// ══════════════════════════════════════════════════
+
+camera.position.set(startX, EYE_Y, startZ);
+camera.rotation.order = 'YXZ';
+let yaw = startYaw, pitch = 0;
+camera.rotation.y = yaw;
+camera.rotation.x = pitch;
+
+// ── Collision ─────────────────────────────────────────────────────
+function canMoveTo(x, z) {
+  const px = x*FT, pz = z*FT, rp = P_R*FT;
+  // Strict: player circle fully inside a tunnel
+  if (TD.some(t =>
+    px-rp >= t.x && px+rp <= t.x+t.w &&
+    pz-rp >= t.y && pz+rp <= t.y+t.h
+  )) return true;
+  // Junction fallback: center inside any tunnel (allows crossing junction gaps)
+  return TD.some(t => px>t.x && px<t.x+t.w && pz>t.y && pz<t.y+t.h);
+}
+
+// ── Input ─────────────────────────────────────────────────────────
+
+
+const keys = new Set();
+let nearExit = false, transitioning = false;
+let nearDoor = false;
+
+// Door animation state
+let doorAnimating = false, doorTargetRot = 0, doorCurrentRot = 0;
+const DOOR_OPEN_ROT  = Math.PI * 0.42;
+const DOOR_CLOSE_ROT = 0;
+const DOOR_INTERACT_R = 14; // ft — how close player must be to cell center
+
+// ✅ EDIT: click-to-select tunnel pieces built by slab()
+let selected = null, selectedEnd = null; // selectedEnd = which end was clicked
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+renderer.domElement.addEventListener("pointerdown", (ev) => {
+  // don't steal clicks while transitioning
+  if (transitioning) return;
+
+  // When pointer-locked the cursor is hidden at screen centre — use NDC (0,0)
+  if (locked) {
+    mouse.set(0, 0);
+  } else {
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((ev.clientX - rect.left) / rect.width)  * 2 - 1;
+    mouse.y = -((ev.clientY - rect.top)  / rect.height) * 2 + 1;
+  }
+
+  raycaster.setFromCamera(mouse, camera);
+
+  const list = window.editableObjects || [];
+  const hits = raycaster.intersectObjects(list, false);
+
+  // Clear old highlight
+  if (selected && selected.material && selected.material.emissive) {
+    selected.material = selected.material.clone();
+    selected.material.emissive.set(0x000000);
+    selected.material.emissiveIntensity = 0;
+  }
+
+  selected    = hits.length ? hits[0].object : null;
+
+  if (selected) document.exitPointerLock();
+
+  // Apply new highlight
+  if (selected && selected.material && selected.material.emissive) {
+    selected.material = selected.material.clone();
+    selected.material.emissive.set(0x4488ff);
+    selected.material.emissiveIntensity = 0.18;
+  }
+
+  setEditMode(false); // clicking resets move mode; press M to re-enter
+  updateEditHint();
+
+  // Detect which END of the wall was clicked — only that end will move
+  if (selected && hits.length) {
+    const hit = hits[0];
+    const p   = selected.geometry.parameters;
+    const effW = p.width * selected.scale.x;
+    const effD = p.depth * selected.scale.z;
+    if (effW >= effD) {
+      // X-axis wall — left or right end
+      selectedEnd = { axis:'x', sign: (hit.point.x - selected.position.x) >= 0 ? 1 : -1 };
+    } else {
+      // Z-axis wall — near or far end
+      selectedEnd = { axis:'z', sign: (hit.point.z - selected.position.z) >= 0 ? 1 : -1 };
+    }
+  } else {
+    selectedEnd = null;
+  }
+});
+
+// Moves only the clicked end of a wall, keeping the opposite end fixed
+function resizeOneEnd(axis, delta) {
+  if (!selected || !selectedEnd || selectedEnd.axis !== axis) return;
+  const geo    = selected.geometry.parameters;
+  const orig   = axis === 'x' ? geo.width : geo.depth;
+  const cur    = orig * (axis === 'x' ? selected.scale.x : selected.scale.z);
+  const center = axis === 'x' ? selected.position.x    : selected.position.z;
+  const sign   = selectedEnd.sign;
+  const fixed  = center - sign * cur / 2;
+  const newSz  = Math.max(0.3, cur + delta * sign);
+  if (axis === 'x') { selected.scale.x = newSz / orig; selected.position.x = fixed + sign * newSz / 2; }
+  else              { selected.scale.z = newSz / orig; selected.position.z = fixed + sign * newSz / 2; }
+
+  // Show live length and step in the HUD
+  const hud = document.getElementById('dim-hud');
+  const dir  = delta > 0 ? '▲' : '▼';
+  const endLabel = selectedEnd.sign > 0 ? (axis === 'x' ? 'right' : 'far') : (axis === 'x' ? 'left' : 'near');
+  hud.textContent = endLabel + ' end  ' + dir + Math.abs(delta).toFixed(2) + ' ft   |   length: ' + newSz.toFixed(2) + ' ft';
+  hud.style.display = 'block';
+}
+
+function hideDimHud() { document.getElementById('dim-hud').style.display = 'none'; }
+
+// ── Show a timed edit-action message in the dim HUD ───────────────
+function flashHud(msg) {
+  const hud = document.getElementById('dim-hud');
+  hud.textContent = msg;
+  hud.style.display = 'block';
+  clearTimeout(window._hudTimer);
+  window._hudTimer = setTimeout(() => { hud.style.display = 'none'; }, 2000);
+}
+
+// ── Persist the current state of `selected` to localStorage ───────
+function saveSelected() {
+ if (!selected) return;
+
+ const id = selected.userData.editId;
+ const raw = localStorage.getItem('basement_edits') || '{}';
+ let data;
+ try { data = JSON.parse(raw); } catch(e) { data = {}; }
+
+ // Read dims from parameters if available, else from userData cache
+ const g = selected.geometry.parameters || {};
+ const prev = data[id] || {};
+ const gw = g.width  !== undefined ? g.width  : (selected.userData._gw || prev.gw);
+ const gh = g.height !== undefined ? g.height : (selected.userData._gh || prev.gh);
+ const gd = g.depth  !== undefined ? g.depth  : (selected.userData._gd || prev.gd);
+
+ // Cache dims on userData so they survive geometry.dispose()
+ if (gw !== undefined) { selected.userData._gw = gw; selected.userData._gh = gh; selected.userData._gd = gd; }
+
+ data[id] = {
+   x: selected.position.x, y: selected.position.y, z: selected.position.z,
+   sx: selected.scale.x, sy: selected.scale.y, sz: selected.scale.z,
+   gw, gh, gd,
+   rotSteps: selected.userData.rotSteps || 0
+ };
+
+ localStorage.setItem('basement_edits', JSON.stringify(data));
+ console.log('💾 saved', id, 'x:', selected.position.x.toFixed(3), 'z:', selected.position.z.toFixed(3), 'gw:', gw);
+}
+// ── Copy: duplicate selected piece, offset slightly, auto-select ──
+function copySelected() {
+  if (!selected) return;
+  const g  = selected.geometry.parameters;
+  const sx = g.width  * selected.scale.x;
+  const sy = g.height * selected.scale.y;
+  const sz = g.depth  * selected.scale.z;
+
+  // Clone material cleanly — strip any highlight emissive from the original
+  const cleanMat = selected.material.clone();
+  cleanMat.emissive.set(0x000000);
+  cleanMat.emissiveIntensity = 0;
+
+  const copy = new THREE.Mesh(
+    new THREE.BoxGeometry(sx, sy, sz),
+    cleanMat
+  );
+  copy.position.set(
+    selected.position.x + 1.5,
+    selected.position.y,
+    selected.position.z + 1.5
+  );
+  copy.rotation.copy(selected.rotation);
+
+  window.__wallIdCounter = window.__wallIdCounter || 0;
+  copy.userData.editId   = 'bsmt_' + (window.__wallIdCounter++);
+  copy.userData.rotSteps = selected.userData.rotSteps || 0;
+
+  scene.add(copy);
+  window.editableObjects = window.editableObjects || [];
+  window.editableObjects.push(copy);
+
+  // De-highlight old selection
+  if (selected.material && selected.material.emissive) {
+    selected.material.emissive.set(0x000000);
+    selected.material.emissiveIntensity = 0;
+  }
+
+  // Highlight the new copy and make it the active selection
+  selected    = copy;
+  selectedEnd = null;
+  selected.material = selected.material.clone();
+  selected.material.emissive.set(0x4488ff);
+  selected.material.emissiveIntensity = 0.18;
+
+  saveSelected();
+  flashHud('✦ COPIED  —  press M then Arrows to move it');
+}
+
+// ── Rotate: spin selected piece 90° around the Y axis ────────────
+function rotateSelected() {
+  if (!selected) return;
+
+  const g   = selected.geometry.parameters;
+  const curW = g.width  * selected.scale.x;
+  const curH = g.height * selected.scale.y;
+  const curD = g.depth  * selected.scale.z;
+
+  // Rebuild geometry with X and Z swapped so resize logic stays correct
+  selected.geometry.dispose();
+  selected.geometry = new THREE.BoxGeometry(curD, curH, curW);
+  selected.scale.set(1, 1, 1);
+
+  selected.userData.rotSteps = ((selected.userData.rotSteps || 0) + 1) % 4;
+  const deg = selected.userData.rotSteps * 90;
+
+  // Flip the selectedEnd axis so further resizing still makes sense
+  if (selectedEnd) {
+    selectedEnd.axis = selectedEnd.axis === 'x' ? 'z' : 'x';
+  }
+
+  saveSelected();
+  flashHud('↻ ROTATED  —  total: ' + deg + '°');
+}
+
+// ── Edit mode state ───────────────────────────────────────────────
+let editMode = false; // toggled by M key
+
+function setEditMode(on) {
+  editMode = on;
+  updateEditHint();
+}
+
+function updateEditHint() {
+  const el = document.getElementById('edit-hint');
+  if (!selected) {
+    el.innerHTML = 'Click a piece to select it';
+    return;
+  }
+  if (editMode) {
+    el.innerHTML = '[ MOVE MODE ]&nbsp; ← → ↑ ↓ move piece &nbsp;|&nbsp; M exit move<br>Shift+← → ↑ ↓ resize end &nbsp;|&nbsp; Shift+R rotate &nbsp;|&nbsp; Shift+C copy';
+    el.style.color = '#d4a84b';
+  } else {
+    el.innerHTML = 'M = move &nbsp;|&nbsp; Shift+← → ↑ ↓ resize end &nbsp;|&nbsp; Shift+R rotate &nbsp;|&nbsp; Shift+C copy';
+    el.style.color = '#2a2a2a';
+  }
+}
+
+// movement + exit key
+document.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (selected) console.log('🎹 keydown:', e.key, 'editMode:', editMode, 'selected:', !!selected);
+  // Always prevent arrow keys from scrolling the page
+  if (["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key)) e.preventDefault();
+
+  // ── M: toggle move mode (only when something selected) ───────────
+  if (e.metaKey || e.ctrlKey) return; // ignore system key combos
+  if (k === 'm' && selected) {
+    e.preventDefault();
+    setEditMode(!editMode);
+    return;
+  }
+
+  // ── Escape: deselect & exit move mode ────────────────────────────
+  if (e.key === 'Escape') {
+    if (selected && selected.material && selected.material.emissive) {
+      selected.material.emissive.set(0x000000);
+      selected.material.emissiveIntensity = 0;
+    }
+    selected    = null;
+    selectedEnd = null;
+    setEditMode(false);
+    hideDimHud();
+    return;
+  }
+
+  const isArrow = ["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key);
+
+  // ── MOVE: arrow keys move piece whenever selected (no M needed) ──
+  if (selected && !e.shiftKey && isArrow) {
+    e.preventDefault();
+    const STEP = 0.5; // 6 inches per keypress
+    if (e.key === 'ArrowLeft')  selected.position.x -= STEP;
+    if (e.key === 'ArrowRight') selected.position.x += STEP;
+    if (e.key === 'ArrowUp')    selected.position.z -= STEP;
+    if (e.key === 'ArrowDown')  selected.position.z += STEP;
+    // Snap to 0.5ft grid so walls connect cleanly
+    selected.position.x = Math.round(selected.position.x / STEP) * STEP;
+    selected.position.z = Math.round(selected.position.z / STEP) * STEP;
+    const hud = document.getElementById('dim-hud');
+    hud.textContent = 'pos  x:' + selected.position.x.toFixed(2) + '  z:' + selected.position.z.toFixed(2);
+    hud.style.display = 'block';
+  saveSelected();
+console.log('💾 saved x:' + selected.position.x.toFixed(2)); // <--- Corrected
+return; 
+  }
+
+  // ── SHIFT + ARROW: resize ────────────────────────────────────────
+  if (selected && e.shiftKey && isArrow) {
+    e.preventDefault();
+    const STEP = 0.5;
+    if (e.key === 'ArrowLeft')  resizeOneEnd('x', -STEP);
+    if (e.key === 'ArrowRight') resizeOneEnd('x', +STEP);
+    if (e.key === 'ArrowUp')    resizeOneEnd('z', +STEP);
+    if (e.key === 'ArrowDown')  resizeOneEnd('z', -STEP);
+    saveSelected();
+    return;
+  }
+
+  // ── SHIFT + C/R: copy / rotate ────────────────────────────────────
+  if (selected && e.shiftKey) {
+    if (e.key === 'c' || e.key === 'C') { e.preventDefault(); copySelected(); }
+    if (e.key === 'r' || e.key === 'R') { e.preventDefault(); rotateSelected(); }
+    saveSelected();
+    return;
+  }
+
+  // ── NORMAL PLAYER MOVEMENT ────────────────────────────────────────
+  // Never let arrows into the keys set while move-mode is active
+  if (editMode && isArrow) { e.preventDefault(); return; }
+
+  keys.add(k);
+  if (k === 'e' && nearDoor && !doorAnimating) {
+    // Toggle door
+    window.prisonDoorOpen = !window.prisonDoorOpen;
+    if(window.SoundSystem)SoundSystem.play(window.prisonDoorOpen?'doorClose':'doorOpen');
+    doorTargetRot = window.prisonDoorOpen ? DOOR_OPEN_ROT : DOOR_CLOSE_ROT;
+    doorAnimating = true;
+  }
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if (k === 'e' && nearExit && !transitioning && !nearDoor) doTransition();
+});
+
+document.addEventListener('keyup', e => {
+  keys.delete(e.key.toLowerCase());
+  if (e.key === 'Shift' && !editMode) hideDimHud();
+});
+// ── Pointer lock ──────────────────────────────────────────────────
+let locked = false;
+const SENS = 0.0018;
+
+document.addEventListener('pointerlockchange', () => {
+  locked = document.pointerLockElement === renderer.domElement;
+  document.getElementById('crosshair').style.display   = locked ? 'block' : 'none';
+  document.getElementById('hud').style.display         = locked ? 'block' : 'none';
+  document.getElementById('resume-hint').style.display = locked ? 'none'  : 'block';
+  document.getElementById('edit-hint').style.display   = locked ? 'block' : 'none';
+  if (locked) updateEditHint();
+});
+
+document.addEventListener('mousemove', e => {
+  if (!locked) return;
+  yaw   -= e.movementX * SENS;
+  pitch -= e.movementY * SENS;
+  pitch  = Math.max(-Math.PI*.42, Math.min(Math.PI*.42, pitch));
+  camera.rotation.y = yaw;
+  camera.rotation.x = pitch;
+});
+
+// Enter / re-enter pointer lock
+function requestLock() {
+  renderer.domElement.requestPointerLock();
+}
+
+
+// ✅ AUTO-START (no button required)
+document.getElementById('start-screen').style.display = 'none';
+requestLock();
+
+renderer.domElement.addEventListener('click', requestLock);
+
+// ── Transition to Floor 1 ─────────────────────────────────────────
+function doTransition() {
+ transitioning = true; 
+ document.getElementById('exit-prompt').style.display = 'none'; 
+ document.getElementById('resume-hint').style.display = 'none'; 
+ if (window._scenario && typeof MysteryState !== 'undefined') MysteryState.saveOnEvent(window._scenario);
+ const fd = document.getElementById('fade'); 
+ const tm = document.getElementById('trans-msg'); 
+ fd.style.opacity = '1'; 
+ setTimeout(() => { tm.style.opacity='1'; tm.textContent='TRANSITIONING TO FLOOR 1…'; }, 900); 
+ if (window._scenario && typeof MysteryState !== 'undefined') MysteryState.saveOnEvent(window._scenario);
+ setTimeout(() => { if(window.SoundSystem)SoundSystem.play('doorOpen');
+ window.location.href = 'floor1.html?from=basement'; }, 2000); 
+} 
+// ── Game loop ─────────────────────────────────────────────────────
+const fwd  = new THREE.Vector3();
+const rgt  = new THREE.Vector3();
+const UP   = new THREE.Vector3(0, 1, 0);
+let   last = performance.now();
+
+
+function tick(now) {
+  requestAnimationFrame(tick);
+
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+
+  if (!transitioning) {
+
+    const turn = 1.8 * dt;
+    if (!editMode) {
+      if (keys.has('arrowleft'))  { yaw += turn; camera.rotation.y = yaw; }
+      if (keys.has('arrowright')) { yaw -= turn; camera.rotation.y = yaw; }
+    }
+
+    camera.getWorldDirection(fwd);
+    fwd.y = 0; fwd.normalize();
+    rgt.crossVectors(fwd, UP);
+
+    let mx = 0, mz = 0;
+
+    // movement only if NOT in edit/move mode
+    if (!(selected && keys.has('shift')) && !editMode) {
+      if (keys.has('w') || keys.has('arrowup')) { mx += fwd.x; mz += fwd.z; }
+      if (keys.has('s') || keys.has('arrowdown')) { mx -= fwd.x; mz -= fwd.z; }
+      if (keys.has('a')) { mx -= rgt.x; mz -= rgt.z; }
+      if (keys.has('d')) { mx += rgt.x; mz += rgt.z; }
+    }
+
+    const mag = Math.hypot(mx, mz);
+    if (mag > 0) {
+      if(window.SoundSystem)SoundSystem.footstep(350);
+      const step = SPEED * dt / mag;
+      const nx = camera.position.x + mx * step;
+      const nz = camera.position.z + mz * step;
+
+      if (canMoveTo(nx, camera.position.z)) camera.position.x = nx;
+      if (canMoveTo(camera.position.x, nz)) camera.position.z = nz;
+    }
+
+    lantern.position.set(camera.position.x, EYE_Y - 0.5, camera.position.z);
+
+    nearExit = EXITS.some(e =>
+      Math.hypot(camera.position.x - e.x, camera.position.z - e.z) < EXIT_R
+    );
+
+    // ── Prison door proximity & animation ─────────────────────────────
+    if (window.prisonDoor && window.prisonDoorWorldPos) {
+      const dp = window.prisonDoorWorldPos;
+      nearDoor = Math.hypot(camera.position.x - dp.x, camera.position.z - dp.z) < DOOR_INTERACT_R;
+
+      // Animate door rotation smoothly
+      if (doorAnimating) {
+        const diff = doorTargetRot - doorCurrentRot;
+        const step = diff * Math.min(1, 6 * dt);
+        doorCurrentRot += step;
+        window.prisonDoor.rotation.y = doorCurrentRot;
+        if (Math.abs(diff) < 0.001) {
+          doorCurrentRot = doorTargetRot;
+          window.prisonDoor.rotation.y = doorTargetRot;
+          doorAnimating = false;
+        }
+      }
+
+      // Door hint
+      const dp2 = document.getElementById('door-prompt');
+      if (nearDoor) {
+        dp2.innerHTML = window.prisonDoorOpen
+          ? 'Press <b>E</b> &nbsp;—&nbsp; Close Cell Door'
+          : 'Press <b>E</b> &nbsp;—&nbsp; Open Cell Door';
+        dp2.style.display = 'block';
+      } else {
+        dp2.style.display = 'none';
+      }
+    }
+
+    document.getElementById('exit-prompt').style.display =
+      (nearExit && !nearDoor && !transitioning) ? 'block' : 'none';
+  }
+
+  renderer.render(scene, camera);
+  if (typeof EvidenceSystem !== "undefined") EvidenceSystem.update();
+}
+requestAnimationFrame(tick);
+})(); // end main IIFE
+
+// ── ☰ Menu (Save / Load / Clear) ─────────────────────────────────
+(function buildMenu() {
+  const BSMT_ID  = 'basement';
+  const INDEX_KEY = BSMT_ID + '_snapshot_index';
+  const SEQ_KEY   = BSMT_ID + '_snapshot_seq';
+
+  // ── Save all editable pieces to a snapshot ──────────────────────
+  function saveBasement() {
+    const data = JSON.parse(localStorage.getItem('basement_edits') || '{}');
+    const count = Object.keys(data).length;
+    console.log('💾 basement_edits entries:', count, data);
+    alert('Saving ' + count + ' pieces. Check console for details.');
+    const payload = { version: 1, savedAt: Date.now(), edits: data };
+    const json    = JSON.stringify(payload);
+
+    // Timestamped snapshot key
+    const now  = new Date();
+    const date = now.getFullYear() + '-' +
+      String(now.getMonth()+1).padStart(2,'0') + '-' +
+      String(now.getDate()).padStart(2,'0');
+    const time = String(now.getHours()).padStart(2,'0') + '-' +
+      String(now.getMinutes()).padStart(2,'0') + '-' +
+      String(now.getSeconds()).padStart(2,'0');
+    const ms  = String(now.getMilliseconds()).padStart(3,'0');
+    const seq = (parseInt(localStorage.getItem(SEQ_KEY) || '0', 10) + 1);
+    localStorage.setItem(SEQ_KEY, String(seq));
+
+    const snapKey = `${BSMT_ID}_snapshot_${date}_${time}-${ms}_${seq}`;
+    localStorage.setItem(snapKey, json);
+
+    // Update index
+    const list = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
+    list.unshift(snapKey);
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+
+    // Refresh dropdown
+    refreshDropdown(list, snapKey);
+    showStatus('✅ Saved');
+  }
+
+  // ── Load a snapshot back into basement_edits then reload ────────
+  function loadSnapshot(key) {
+    const raw = localStorage.getItem(key);
+    if (!raw) return;
+    const payload = JSON.parse(raw);
+    localStorage.setItem('basement_edits', JSON.stringify(payload.edits || {}));
+    showStatus('🔁 Loaded — reloading…');
+    setTimeout(() => location.reload(), 800);
+  }
+
+  // ── Clear all basement saves ─────────────────────────────────────
+  function clearSaves() {
+    if (!confirm('Clear all basement saves?')) return;
+    const list = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
+    list.forEach(k => localStorage.removeItem(k));
+    localStorage.removeItem(INDEX_KEY);
+    localStorage.removeItem(SEQ_KEY);
+    localStorage.removeItem('basement_edits');
+    showStatus('🗑 Cleared');
+    refreshDropdown([], '');
+  }
+
+  // ── Status flash ────────────────────────────────────────────────
+  function showStatus(msg) {
+    statusEl.textContent = msg;
+    statusEl.style.opacity = '1';
+    clearTimeout(showStatus._t);
+    showStatus._t = setTimeout(() => { statusEl.style.opacity = '0'; }, 2200);
+  }
+
+  // ── Dropdown refresh ────────────────────────────────────────────
+  function refreshDropdown(list, selectKey) {
+    sel.innerHTML = '';
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = list.length ? '— load snapshot —' : '(no snapshots)';
+    sel.appendChild(placeholder);
+    list.forEach(k => {
+      const o = document.createElement('option');
+      o.value = k; o.textContent = k.replace(BSMT_ID + '_snapshot_', '');
+      sel.appendChild(o);
+    });
+    if (selectKey) sel.value = selectKey;
+  }
+
+  // ── Build UI ─────────────────────────────────────────────────────
+  const S = (el, css) => Object.assign(el.style, css);
+  const BTN_STYLE = {
+    display:'block', width:'100%', margin:'6px 0',
+    padding:'8px 12px', borderRadius:'10px',
+    border:'1px solid rgba(255,255,255,0.22)',
+    background:'rgba(0,0,0,0.72)', color:'#eee',
+    fontFamily:'ui-monospace,monospace', fontSize:'13px',
+    cursor:'pointer', textAlign:'left'
+  };
+
+  // Wrapper
+  const wrap = document.createElement('div');
+  S(wrap, { position:'fixed', top:'54px', left:'10px', zIndex:'120',
+            fontFamily:'ui-monospace,monospace' });
+
+  // Toggle button
+  const menuBtn = document.createElement('button');
+  menuBtn.textContent = '☰ Menu';
+  S(menuBtn, { padding:'8px 14px', borderRadius:'10px',
+               border:'1px solid rgba(255,255,255,0.25)',
+               background:'rgba(0,0,0,0.72)', color:'#eee',
+               fontFamily:'ui-monospace,monospace', fontSize:'13px',
+               cursor:'pointer' });
+
+  // Panel
+  const panel = document.createElement('div');
+  S(panel, { display:'none', marginTop:'8px', padding:'10px',
+             borderRadius:'12px', border:'1px solid rgba(255,255,255,0.18)',
+             background:'rgba(0,0,0,0.85)', minWidth:'240px',
+             boxShadow:'0 10px 30px rgba(0,0,0,0.5)' });
+
+  menuBtn.onclick = () => {
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  };
+  document.addEventListener('pointerdown', e => {
+    if (!wrap.contains(e.target)) panel.style.display = 'none';
+  }, { capture: true });
+
+  // Save button
+  const saveBtn = document.createElement('button');
+  saveBtn.textContent = '💾 Save Layout';
+  S(saveBtn, BTN_STYLE);
+  saveBtn.onclick = saveBasement;
+
+  // Clear button
+  const clearBtn = document.createElement('button');
+  clearBtn.textContent = '🗑 Clear All Saves';
+  S(clearBtn, BTN_STYLE);
+  clearBtn.onclick = clearSaves;
+
+  // Snapshot dropdown
+  const sel = document.createElement('select');
+  S(sel, { display:'block', width:'100%', margin:'6px 0',
+           padding:'8px 10px', borderRadius:'10px',
+           border:'1px solid rgba(255,255,255,0.22)',
+           background:'rgba(0,0,0,0.72)', color:'#eee',
+           fontFamily:'ui-monospace,monospace', fontSize:'12px',
+           cursor:'pointer' });
+  sel.onchange = () => { if (sel.value) loadSnapshot(sel.value); };
+
+  // Status line
+  const statusEl = document.createElement('div');
+  S(statusEl, { color:'#9fe870', fontSize:'11px', marginTop:'6px',
+                opacity:'0', transition:'opacity 0.4s', textAlign:'center' });
+
+  panel.appendChild(saveBtn);
+  panel.appendChild(clearBtn);
+  panel.appendChild(sel);
+  panel.appendChild(statusEl);
+  wrap.appendChild(menuBtn);
+  wrap.appendChild(panel);
+  document.body.appendChild(wrap);
+
+  // Init dropdown
+  const list = JSON.parse(localStorage.getItem(INDEX_KEY) || '[]');
+  refreshDropdown(list, '');
+})();
+</script>
+<script src="../floor1/sound-system.js"></script>
+<script src="../floor1/mystery-engine.js"></script>
+<script src="../floor1/mystery-state.js"></script>
+<script src="../floor1/mystery-ui.js"></script>
+<script src="../floor1/evidence-system.js"></script>
+<script>
+(async () => {
+  await MysteryEngine.init();
+  let scenario = await MysteryState.load();
+  const isNew = !scenario;
+  if (isNew) { scenario = MysteryEngine.generate(); await MysteryState.save(scenario); }
+  window._scenario = scenario;
+  MysteryUI.init(scenario, isNew);
+  MysteryUI.setZone('basement_tunnels');
+  const _bsmtZones = ['basement_tunnels', 'prison'];
+  const _bsmtClues = (scenario.cluePool || []).filter(c => _bsmtZones.includes(c.assignedRoom) && !c.collected);
+  console.log('🔍 Basement clues to place:', _bsmtClues.length, _bsmtClues.map(c => c.poolIndex));
+  const _basementPositions = [
+    { x:  48, y: 4.0, z:  83 },
+    { x: 174, y: 4.0, z:  65 },
+    { x:  64, y: 4.0, z: 113 },
+    { x: 126, y: 4.0, z:  85 },
+  ];
+  EvidenceSystem.init({ camera: window._bsmtCamera, scene: window._bsmtScene, renderer: window._bsmtRenderer, zoneId: 'basement_tunnels', clues: _bsmtClues, positions: _basementPositions, orbSize: 0.5, pickRadius: 25 });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

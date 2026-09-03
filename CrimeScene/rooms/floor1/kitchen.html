@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Restaurant Kitchen</title>
+<style>
+#exitFade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9999;transition:opacity 0.6s ease;}
+#exitFade.show{opacity:1;}
+#doorHint{position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#ffdd88;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:system-ui,Arial,sans-serif;}
+#instructionLine{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:8px 16px;font-size:14px;color:#eee;background:rgba(0,0,0,0.6);border-radius:6px;z-index:30;pointer-events:none;white-space:nowrap;}
+body{margin:0;overflow:hidden;background:#000;}
+canvas{display:block;}
+#fadeOverlay{position:fixed;inset:0;background:#000;z-index:9999;animation:fadeOut 0.8s ease forwards;}
+@keyframes fadeOut{from{opacity:1;}to{opacity:0;}}
+#editBar{position:fixed;top:50px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:60;font-family:system-ui,Arial,sans-serif;}
+#editBar button{padding:7px 13px;border-radius:8px;border:1px solid rgba(255,255,255,0.25);background:rgba(0,0,0,0.75);color:#eee;cursor:pointer;font-size:13px;}
+#editBar button.active{background:rgba(20,120,20,0.85);border-color:#44ff88;color:#d5ffd5;}
+#editHint{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:7px 16px;background:rgba(0,0,0,0.8);color:#aaffaa;border-radius:7px;font-size:13px;display:none;z-index:60;font-family:system-ui,Arial,sans-serif;pointer-events:none;}
+#selectedInfo{position:fixed;top:10px;left:10px;padding:8px 12px;background:rgba(0,0,0,0.8);color:#aaddff;border-radius:8px;font-size:12px;display:none;z-index:60;font-family:monospace;}
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="doorHint">Press E — Return to Floor 1</div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit</div>
+<div id="fadeOverlay"></div>
+<div id="editBar">
+  <button id="editBtn" onclick="toggleEdit()">✏️ Edit Mode</button>
+  <button onclick="saveKitchen()">💾 Save</button>
+  <button onclick="loadKitchen()">📂 Load</button>
+</div>
+<div id="editHint">Click object to select • ←→↑↓ Move • Shift+↑↓ Height • R Rotate • Del Delete • Esc Deselect</div>
+<div id="selectedInfo"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+const S = 0.5;
+const RW = 1000*S, RD = 800*S, RH = 420*S;
+const WT = 20*S;
+
+let scene, camera, renderer;
+let moveForward=false, moveBackward=false, turnLeft=false, turnRight=false;
+let yaw=0, prevTime=performance.now();
+let nearExit=false, exitTriggered=false;
+
+// ── EDIT SYSTEM ──────────────────────────────────────────
+let EDIT_MODE=false;
+let editableObjects=[];
+let selectedObj=null;
+let editHighlight=null;
+const SAVE_KEY='kitchen_layout';
+const raycaster=new THREE.Raycaster();
+const mouse=new THREE.Vector2();
+
+function toggleEdit(){
+  EDIT_MODE=!EDIT_MODE;
+  document.getElementById('editBtn').classList.toggle('active',EDIT_MODE);
+  document.getElementById('editHint').style.display=EDIT_MODE?'block':'none';
+  if(!EDIT_MODE) deselect();
+}
+
+function addEditable(mesh,id){
+  if(!mesh.userData)mesh.userData={};
+  mesh.userData.editId=id;
+  editableObjects.push(mesh);
+  return mesh;
+}
+
+function deselect(){
+  if(selectedObj){
+    selectedObj.material.emissive&&(selectedObj.material.emissive.setHex(selectedObj.userData._emissive||0));
+  }
+  selectedObj=null;
+  document.getElementById('selectedInfo').style.display='none';
+}
+
+function selectObj(obj){
+  deselect();
+  selectedObj=obj;
+  if(obj.material&&obj.material.emissive){
+    obj.userData._emissive=obj.material.emissive.getHex();
+    obj.material.emissive.setHex(0x226622);
+  }
+  updateSelInfo();
+}
+
+function updateSelInfo(){
+  if(!selectedObj)return;
+  const p=selectedObj.position;
+  const el=document.getElementById('selectedInfo');
+  el.style.display='block';
+  el.textContent=`[${selectedObj.userData.editId}]  X:${p.x.toFixed(1)}  Y:${p.y.toFixed(1)}  Z:${p.z.toFixed(1)}`;
+}
+
+function saveKitchen(){
+  const data=editableObjects
+    .filter(o=>o&&o.userData&&o.userData.editId)
+    .map(o=>({id:o.userData.editId,
+      px:o.position.x,py:o.position.y,pz:o.position.z,
+      ry:o.rotation.y}));
+  localStorage.setItem(SAVE_KEY,JSON.stringify(data));
+  alert('Kitchen layout saved!');
+}
+
+function loadKitchen(){
+  const raw=localStorage.getItem(SAVE_KEY);
+  if(!raw){alert('No saved layout found.');return;}
+  const data=JSON.parse(raw);
+  data.forEach(d=>{
+    const obj=editableObjects.find(o=>o.userData.editId===d.id);
+    if(obj){obj.position.set(d.px,d.py,d.pz);obj.rotation.y=d.ry;}
+  });
+}
+
+window.addEventListener('click',e=>{
+  if(!EDIT_MODE)return;
+  mouse.x=(e.clientX/innerWidth)*2-1;
+  mouse.y=-(e.clientY/innerHeight)*2+1;
+  raycaster.setFromCamera(mouse,camera);
+  const hits=raycaster.intersectObjects(editableObjects,false);
+  if(hits.length>0) selectObj(hits[0].object);
+  else deselect();
+});
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById('fadeOverlay');if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x0a0a0a);
+  scene.fog=new THREE.Fog(0x0a0a0a,300,900);
+
+  camera=new THREE.PerspectiveCamera(72,innerWidth/innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(innerWidth,innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Kitchen lighting — harsh fluorescent overhead
+  scene.add(new THREE.AmbientLight(0x334433,0.4));
+  // Fluorescent strips — cool white
+  [-RW/3,0,RW/3].forEach(lx=>{
+    const strip=new THREE.PointLight(0xddeeff,1.0,500);
+    strip.position.set(lx,RH-20*S,0); scene.add(strip);
+  });
+  // Warm accent over cooking line
+  const heatGlow=new THREE.PointLight(0xff6600,0.6,200);
+  heatGlow.position.set(0,RH*0.5,-RD/2+120*S); scene.add(heatGlow);
+  const heatGlow2=new THREE.PointLight(0xff4400,0.4,150);
+  heatGlow2.position.set(RW/4,RH*0.4,-RD/2+120*S); scene.add(heatGlow2);
+
+  buildRoom();
+  buildCookingLine();
+  buildPrepStation();
+  buildPassStation();
+  buildSinkArea();
+  buildStorageRacks();
+  buildOverheadRacks();
+  buildDoors();
+
+  document.addEventListener('keydown',onKeyDown);
+  document.addEventListener('keyup',onKeyUp);
+  window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+  const fromFloor1=new URLSearchParams(window.location.search).get('from')==='floor1';
+  camera.position.set(0,190*S,RD/2-80*S);
+  yaw=0;
+  updateRotation();
+  animate();
+}
+
+// ── MATERIALS ──────────────────────────────────────────────
+const steel    =()=>new THREE.MeshLambertMaterial({color:0x9aabb8});
+const darkSteel=()=>new THREE.MeshLambertMaterial({color:0x445566});
+const brushed  =()=>new THREE.MeshLambertMaterial({color:0xb8c8d4});
+const black    =()=>new THREE.MeshLambertMaterial({color:0x1a1a1a});
+const white    =()=>new THREE.MeshLambertMaterial({color:0xf0f0ee});
+const tileFloor=()=>new THREE.MeshLambertMaterial({color:0x888880});
+const tileWall =()=>new THREE.MeshLambertMaterial({color:0xd8d8d4});
+const copper   =()=>new THREE.MeshLambertMaterial({color:0xb87333});
+const orange   =()=>new THREE.MeshLambertMaterial({color:0xff6600,emissive:0x441100});
+const red      =()=>new THREE.MeshLambertMaterial({color:0xcc2200});
+const woodMat  =()=>new THREE.MeshLambertMaterial({color:0x8b6914});
+const rubberMat=()=>new THREE.MeshLambertMaterial({color:0x222222});
+const glassMat =()=>new THREE.MeshLambertMaterial({color:0x88aacc,transparent:true,opacity:0.3});
+const potMat   =()=>new THREE.MeshLambertMaterial({color:0x445544});
+
+function box(w,h,d,m,scene_){ const mesh=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m); scene_.add(mesh); return mesh; }
+function cyl(rt,rb,h,seg,m,scene_){ const mesh=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,seg),m); scene_.add(mesh); return mesh; }
+let _editIdCounter=0;
+function B(w,h,d,m,editId){ const mesh=box(w,h,d,m,scene); if(editId){mesh.userData.editId=editId;editableObjects.push(mesh);} return mesh; }
+function C(rt,rb,h,seg,m,editId){ const mesh=cyl(rt,rb,h,seg,m,scene); if(editId){mesh.userData.editId=editId;editableObjects.push(mesh);} return mesh; }
+function eId(prefix){ return prefix+'_'+(++_editIdCounter); }
+
+// ── ROOM ───────────────────────────────────────────────────
+function buildRoom(){
+  // Floor — non-slip quarry tiles
+  const tA=new THREE.MeshLambertMaterial({color:0x666658});
+  const tB=new THREE.MeshLambertMaterial({color:0x555548});
+  const tSz=40*S;
+  for(let ix=0;ix<Math.ceil(RW/tSz);ix++)
+    for(let iz=0;iz<Math.ceil(RD/tSz);iz++){
+      const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-1,2*S,tSz-1),(ix+iz)%2===0?tA:tB);
+      t.position.set(-RW/2+tSz*(ix+0.5),1*S,-RD/2+tSz*(iz+0.5)); scene.add(t);
+    }
+  // Floor drain
+  const drain=C(12*S,12*S,2*S,12,darkSteel());
+  drain.position.set(0,2*S,0);
+  const grate=B(20*S,1*S,20*S,darkSteel()); grate.position.set(0,3*S,0);
+
+  // Ceiling — exposed ducting
+  const ceil=B(RW,10*S,RD,new THREE.MeshLambertMaterial({color:0x222222}));
+  ceil.position.set(0,RH+5*S,0);
+  // Main duct
+  const duct=B(RW,30*S,40*S,darkSteel()); duct.position.set(0,RH-15*S,0);
+  // Duct flanges
+  [-RW/3,0,RW/3].forEach(dx=>{
+    const flange=B(50*S,4*S,44*S,steel()); flange.position.set(dx,RH-1*S,0);
+  });
+
+  // Walls — white ceramic tiles
+  const wallMat=tileWall();
+  const backW=B(RW,RH,WT,wallMat); backW.position.set(0,RH/2,-RD/2+WT/2);
+  const leftW=B(WT,RH,RD,wallMat); leftW.position.set(-RW/2+WT/2,RH/2,0);
+  const rightW=B(WT,RH,RD,wallMat); rightW.position.set(RW/2-WT/2,RH/2,0);
+  // Front wall with door gap
+  const doorW=220*S, fSideW=(RW-doorW)/2;
+  const fL=B(fSideW,RH,WT,wallMat); fL.position.set(-(doorW/2+fSideW/2),RH/2,RD/2-WT/2);
+  const fR=B(fSideW,RH,WT,wallMat); fR.position.set( doorW/2+fSideW/2, RH/2,RD/2-WT/2);
+
+  // Tile grout lines on back wall
+  for(let ty=0;ty<8;ty++){
+    const grout=B(RW,1*S,1*S,darkSteel()); grout.position.set(0,ty*50*S,-RD/2+WT+0.5);
+  }
+
+  // Fluorescent light tubes on ceiling
+  [-RW/3,0,RW/3].forEach(lx=>{
+    const tube=B(8*S,4*S,RD-WT*2-20*S,new THREE.MeshLambertMaterial({color:0xeeeeff,emissive:0x5566aa}));
+    tube.position.set(lx,RH-2*S,0);
+    // Tube housing
+    const housing=B(12*S,8*S,RD-WT*2-18*S,darkSteel()); housing.position.set(lx,RH-4*S,0);
+  });
+
+  // Wall-mounted order tickets rail
+  const rail=B(RW*0.6,4*S,4*S,steel()); rail.position.set(0,RH*0.7,RD/2-WT-2*S);
+  // Ticket clips
+  for(let i=0;i<8;i++){
+    const clip=C(3*S,3*S,6*S,6,steel()); clip.rotation.z=Math.PI/2;
+    clip.position.set(-RW*0.27+i*RW*0.078,RH*0.7+2*S,RD/2-WT-2*S);
+    // Paper tickets
+    if(i%3!==2){
+      const ticket=B(16*S,22*S,1*S,new THREE.MeshLambertMaterial({color:0xfffde8}));
+      ticket.position.set(-RW*0.27+i*RW*0.078,RH*0.7-10*S,RD/2-WT-1*S);
+    }
+  }
+}
+
+// ── COOKING LINE ───────────────────────────────────────────
+function buildCookingLine(){
+  const lineZ=-RD/2+80*S;
+  const counterH=95*S;
+
+  // ── 1. Range / stove (left section) ──
+  const rangeX=-RW/3;
+  const range=B(280*S,counterH,80*S,darkSteel(),eId("range")); range.position.set(rangeX,counterH/2,lineZ);
+  // Burners (6 burners)
+  [[-80*S,-15*S],[-20*S,-15*S],[40*S,-15*S],[-80*S,15*S],[-20*S,15*S],[40*S,15*S]].forEach(([bx,bz])=>{
+    const burner=C(14*S,14*S,3*S,12,black()); burner.position.set(rangeX+bx,counterH+1.5*S,lineZ+bz);
+    const grate=B(24*S,4*S,24*S,black()); grate.position.set(rangeX+bx,counterH+3*S,lineZ+bz);
+    // Flame (some burners on)
+    if(Math.abs(bx)===80*S||bz===15*S){
+      const flame=C(6*S,3*S,8*S,8,orange()); flame.position.set(rangeX+bx,counterH+7*S,lineZ+bz);
+      const flame2=C(3*S,1*S,6*S,8,new THREE.MeshLambertMaterial({color:0x4488ff,emissive:0x002244}));
+      flame2.position.set(rangeX+bx,counterH+4*S,lineZ+bz);
+    }
+  });
+  // Oven doors below
+  [-60*S,60*S].forEach(ox=>{
+    const oDoor=B(110*S,40*S,6*S,steel()); oDoor.position.set(rangeX+ox,counterH/2-10*S,lineZ+42*S);
+    const oHandle=B(80*S,6*S,6*S,brushed()); oHandle.position.set(rangeX+ox,counterH/2+5*S,lineZ+46*S);
+    const oWindow=B(70*S,24*S,2*S,glassMat()); oWindow.position.set(rangeX+ox,counterH/2-12*S,lineZ+44*S);
+  });
+  // Knobs
+  for(let k=0;k<6;k++){
+    const knob=C(5*S,5*S,8*S,10,steel()); knob.rotation.x=Math.PI/2;
+    knob.position.set(rangeX-100*S+k*40*S,counterH-5*S,lineZ+44*S);
+  }
+
+  // ── 2. Flat-top griddle (centre) ──
+  const gridX=0;
+  const griddle=B(200*S,counterH,80*S,darkSteel(),eId("griddle")); griddle.position.set(gridX,counterH/2,lineZ);
+  const griddleSurface=B(180*S,4*S,65*S,new THREE.MeshLambertMaterial({color:0x333333}));
+  griddleSurface.position.set(gridX,counterH+2*S,lineZ);
+  // Heat shimmer lines on griddle
+  for(let g=0;g<5;g++){
+    const hline=B(170*S,1*S,2*S,new THREE.MeshLambertMaterial({color:0x882200,emissive:0x330800}));
+    hline.position.set(gridX,counterH+4.5*S,lineZ-24*S+g*12*S);
+  }
+  // Grease trap front
+  const trap=B(190*S,8*S,6*S,black()); trap.position.set(gridX,counterH-4*S,lineZ+41*S);
+
+  // ── 3. Fryer station (right) ──
+  const fryX=RW/3;
+  const fryBase=B(200*S,counterH,80*S,darkSteel(),eId("fryer")); fryBase.position.set(fryX,counterH/2,lineZ);
+  // Two fryer vats
+  [-40*S,40*S].forEach(fx=>{
+    const vat=B(70*S,50*S,60*S,black()); vat.position.set(fryX+fx,counterH-5*S,lineZ);
+    // Oil surface
+    const oil=B(60*S,2*S,50*S,new THREE.MeshLambertMaterial({color:0xd4a020,transparent:true,opacity:0.85}));
+    oil.position.set(fryX+fx,counterH+20*S,lineZ);
+    // Basket handles
+    const bHandle=B(4*S,30*S,4*S,steel()); bHandle.position.set(fryX+fx,counterH+35*S,lineZ-20*S);
+    // Fryer knobs
+    const fKnob=C(5*S,5*S,8*S,10,red()); fKnob.rotation.x=Math.PI/2;
+    fKnob.position.set(fryX+fx,counterH-15*S,lineZ+42*S);
+  });
+
+  // ── Hood ventilation above cooking line ──
+  const hood=B(RW*0.85,40*S,100*S,steel(),eId("hood")); hood.position.set(0,RH-60*S,lineZ);
+  const hoodBottom=B(RW*0.85,6*S,100*S,darkSteel()); hoodBottom.position.set(0,RH-82*S,lineZ);
+  // Hood filters
+  for(let f=0;f<5;f++){
+    const filter=B(RW*0.15,4*S,80*S,new THREE.MeshLambertMaterial({color:0x889999}));
+    filter.position.set(-RW*0.34+f*RW*0.17,RH-83*S,lineZ);
+  }
+  // Exhaust pipe
+  const pipe=C(20*S,20*S,RH-80*S-40*S,12,darkSteel());
+  pipe.position.set(0,RH-80*S-(RH-80*S-40*S)/2,lineZ);
+
+  // ── Stainless steel counter top above all ──
+  const counterTop=B(RW*0.92,6*S,88*S,brushed()); counterTop.position.set(0,counterH+3*S,lineZ);
+
+  // ── Pots on stove ──
+  const pM=potMat();
+  const pot1=C(18*S,16*S,24*S,12,pM); pot1.position.set(rangeX-80*S,counterH+16*S,lineZ-15*S);
+  const pot1lid=C(19*S,19*S,4*S,12,pM); pot1lid.position.set(rangeX-80*S,counterH+28*S,lineZ-15*S);
+  const pot1knob=C(3*S,3*S,5*S,8,steel()); pot1knob.position.set(rangeX-80*S,counterH+31*S,lineZ-15*S);
+  // Pan on another burner
+  const pan=C(22*S,20*S,8*S,12,pM); pan.position.set(rangeX+40*S,counterH+6*S,lineZ+15*S);
+  const panHandle=B(40*S,5*S,5*S,black()); panHandle.position.set(rangeX+62*S,counterH+5*S,lineZ+15*S);
+}
+
+// ── PREP STATION ───────────────────────────────────────────
+function buildPrepStation(){
+  const prepZ=0; // centre of room
+  const counterH=95*S;
+  const prepGapW=160*S;
+  const prepHalfW=(RW*0.85-prepGapW)/2;
+  const prepCX=prepGapW/2+prepHalfW/2;
+
+  // Left half prep counter
+  const counterL=B(prepHalfW,counterH,70*S,darkSteel(),eId("prep_L")); counterL.position.set(-prepCX,counterH/2,prepZ);
+  const topL=B(prepHalfW,5*S,72*S,brushed()); topL.position.set(-prepCX,counterH+2.5*S,prepZ);
+  // Right half prep counter
+  const counterR=B(prepHalfW,counterH,70*S,darkSteel(),eId("prep_R")); counterR.position.set(prepCX,counterH/2,prepZ);
+  const topR=B(prepHalfW,5*S,72*S,brushed()); topR.position.set(prepCX,counterH+2.5*S,prepZ);
+  // Undershelves
+  const shelfL=B(prepHalfW,4*S,65*S,steel()); shelfL.position.set(-prepCX,35*S,prepZ);
+  const shelfR=B(prepHalfW,4*S,65*S,steel()); shelfR.position.set(prepCX,35*S,prepZ);
+
+  // Cutting boards on counter
+  [[-prepCX+prepHalfW*0.3,0],[prepCX-prepHalfW*0.3,0]].forEach(([cx,cz])=>{
+    const board=B(70*S,3*S,45*S,woodMat()); board.position.set(cx,counterH+4*S,prepZ);
+    // Food items on boards
+    if(cx===-RW/4){
+      // Chopped veg
+      const veg=B(30*S,4*S,20*S,new THREE.MeshLambertMaterial({color:0x44aa22}));
+      veg.position.set(cx,counterH+7*S,prepZ);
+    } else if(cx===0){
+      // Meat portion
+      const meat=B(28*S,6*S,18*S,new THREE.MeshLambertMaterial({color:0xaa2222}));
+      meat.position.set(cx,counterH+7*S,prepZ);
+    }
+  });
+
+  // Knives in magnetic strip on wall
+  const strip=B(200*S,6*S,4*S,darkSteel()); strip.position.set(-RW/4,RH*0.45,-RD/2+WT+2*S);
+  for(let k=0;k<5;k++){
+    const blade=B(3*S,28*S,2*S,steel()); blade.position.set(-RW/4-80*S+k*40*S,RH*0.45,- RD/2+WT+4*S);
+    const handle2=B(3*S,12*S,4*S,black()); handle2.position.set(-RW/4-80*S+k*40*S,RH*0.45-20*S,-RD/2+WT+4*S);
+  }
+
+  // Hotel pans / containers on undershelf
+  [-prepCX+prepHalfW*0.1,-prepCX-prepHalfW*0.3,prepCX-prepHalfW*0.1,prepCX+prepHalfW*0.3].forEach((px,i)=>{
+    const pan=B(55*S,14*S,50*S,steel()); pan.position.set(px,42*S,prepZ);
+    const content=B(50*S,6*S,46*S,new THREE.MeshLambertMaterial({color:[0xdd4422,0x44aa22,0xddaa22,0xffffff,0x884422][i]}));
+    content.position.set(px,46*S,prepZ);
+  });
+
+  // Mixer on far end
+  const mixerBase=B(40*S,30*S,40*S,steel(),eId("mixer")); mixerBase.position.set(RW/2-80*S,counterH+15*S,prepZ);
+  const mixerHead=B(35*S,25*S,35*S,steel()); mixerHead.position.set(RW/2-80*S,counterH+40*S,prepZ);
+  const mixerBowl=C(18*S,14*S,20*S,12,brushed()); mixerBowl.position.set(RW/2-80*S,counterH+10*S,prepZ);
+  const mixerArm=B(4*S,30*S,4*S,darkSteel()); mixerArm.position.set(RW/2-80*S,counterH+35*S,prepZ-8*S);
+
+  // Speed rack (sheet pan rack)
+  const rackX=RW/2-40*S;
+  const rackFrame=B(8*S,RH*0.7,8*S,steel(),eId("speed_rack")); rackFrame.position.set(rackX,RH*0.35,0);
+  const rackFrame2=rackFrame.clone(); rackFrame2.position.x=rackX-60*S; scene.add(rackFrame2);
+  for(let r=0;r<6;r++){
+    const rung=B(62*S,3*S,50*S,steel()); rung.position.set(rackX-30*S,r*30*S+20*S,0);
+    // Sheet pans on some levels
+    if(r%2===0){
+      const pan2=B(58*S,2*S,45*S,brushed()); pan2.position.set(rackX-30*S,r*30*S+22*S,0);
+    }
+  }
+}
+
+// ── PASS / EXPO STATION ────────────────────────────────────
+function buildPassStation(){
+  const passZ=RD/4-20*S; // between prep and door
+  const counterH=95*S;
+  const gapW=160*S; // walkthrough gap centred at X=0
+  const halfW=(RW*0.7-gapW)/2;
+  const halfCX=gapW/2+halfW/2;
+
+  // Left half counter
+  const passL=B(halfW,counterH,40*S,steel(),eId("pass_L")); passL.position.set(-halfCX,counterH/2,passZ);
+  const passTopL=B(halfW,5*S,42*S,brushed()); passTopL.position.set(-halfCX,counterH+2.5*S,passZ);
+  // Right half counter
+  const passR=B(halfW,counterH,40*S,steel(),eId("pass_R")); passR.position.set(halfCX,counterH/2,passZ);
+  const passTopR=B(halfW,5*S,42*S,brushed()); passTopR.position.set(halfCX,counterH+2.5*S,passZ);
+  // Heat lamps above pass
+  [-RW/5,0,RW/5].forEach(lx=>{
+    const lampArm=B(4*S,40*S,4*S,darkSteel()); lampArm.position.set(lx,RH-40*S,passZ);
+    const lampHead=C(14*S,14*S,8*S,12,darkSteel()); lampHead.position.set(lx,RH-65*S,passZ);
+    const heatBulb=C(10*S,10*S,6*S,12,new THREE.MeshLambertMaterial({color:0xff4400,emissive:0xaa1100}));
+    heatBulb.position.set(lx,RH-70*S,passZ);
+  });
+  // Plates on pass
+  for(let p=0;p<5;p++){
+    const plate=C(18*S,18*S,3*S,16,white()); plate.position.set(-RW/4+p*RW/9,counterH+4*S,passZ);
+    // Food on some plates
+    if(p%2===0){
+      const food=C(10*S,10*S,6*S,8,new THREE.MeshLambertMaterial({color:[0xaa3300,0xee9900,0x336600][p%3]}));
+      food.position.set(-RW/4+p*RW/9,counterH+8*S,passZ);
+    }
+  }
+  // Ticket rail above pass
+  const tRail=B(RW*0.65,4*S,4*S,steel()); tRail.position.set(0,RH*0.75,passZ);
+}
+
+// ── SINK AREA ──────────────────────────────────────────────
+function buildSinkArea(){
+  const sinkX=-RW/2+80*S;
+  const sinkZ=-80*S;
+  const counterH=95*S;
+
+  // Three-compartment sink
+  const sinkBase=B(250*S,counterH,70*S,steel(),eId("sink_3comp")); sinkBase.position.set(sinkX,counterH/2,sinkZ);
+  const sinkTop=B(250*S,5*S,72*S,brushed()); sinkTop.position.set(sinkX,counterH+2.5*S,sinkZ);
+  // Three basins
+  [-70*S,0,70*S].forEach(bx=>{
+    const basin=B(60*S,30*S,55*S,steel()); basin.position.set(sinkX+bx,counterH-8*S,sinkZ);
+    // Water in middle basin
+    if(bx===0){
+      const water=B(54*S,4*S,50*S,new THREE.MeshLambertMaterial({color:0x4488bb,transparent:true,opacity:0.6}));
+      water.position.set(sinkX,counterH-2*S,sinkZ);
+    }
+    // Faucets
+    const faucetPipe=C(2.5*S,2.5*S,25*S,8,brushed()); faucetPipe.position.set(sinkX+bx,counterH+14*S,sinkZ-20*S);
+    const faucetHead=C(2.5*S,2.5*S,20*S,8,brushed()); faucetHead.rotation.x=Math.PI/2;
+    faucetHead.position.set(sinkX+bx,counterH+25*S,sinkZ-10*S);
+    const faucetSpout=C(3*S,2*S,15*S,8,brushed()); faucetSpout.position.set(sinkX+bx,counterH+10*S,sinkZ-5*S);
+    faucetSpout.rotation.x=0.4;
+  });
+
+  // Dish rack beside sink
+  const rackBase=B(120*S,10*S,60*S,steel()); rackBase.position.set(sinkX+170*S,counterH+5*S,sinkZ);
+  for(let r=0;r<4;r++){
+    for(let c=0;c<3;c++){
+      const plate2=C(16*S,16*S,3*S,12,white()); plate2.rotation.z=Math.PI/2;
+      plate2.position.set(sinkX+120*S+c*30*S,counterH+18*S+r*20*S,sinkZ);
+    }
+  }
+
+  // Hand washing sink (separate, smaller)
+  const hwSinkX=RW/2-60*S, hwSinkZ=RD/4+30*S;
+  const hwBase=B(70*S,counterH,50*S,steel()); hwBase.position.set(hwSinkX,counterH/2,hwSinkZ);
+  const hwBasin=B(55*S,25*S,40*S,steel()); hwBasin.position.set(hwSinkX,counterH-5*S,hwSinkZ);
+  const hwFaucet=C(2*S,2*S,20*S,8,brushed()); hwFaucet.position.set(hwSinkX,counterH+10*S,hwSinkZ-10*S);
+  // Soap dispenser
+  const soap=B(10*S,20*S,10*S,new THREE.MeshLambertMaterial({color:0xddcc22}));
+  soap.position.set(hwSinkX+25*S,counterH+10*S,hwSinkZ);
+}
+
+// ── STORAGE RACKS / SHELVING ───────────────────────────────
+function buildStorageRacks(){
+  // Right wall dry goods shelving
+  const shelfX=RW/2-WT-30*S;
+  const shelfMat=steel();
+  for(let lv=0;lv<5;lv++){
+    const shelf=B(60*S,4*S,RD*0.45,shelfMat); shelf.position.set(shelfX,50*S+lv*60*S,-RD/4);
+    // Cans/containers on shelves
+    for(let c=0;c<4;c++){
+      const can=C(8*S,8*S,20*S,10,new THREE.MeshLambertMaterial({color:[0xcc4422,0x336699,0x226633,0xaa8822][c%4]}));
+      can.position.set(shelfX,55*S+lv*60*S+10*S,-RD/2+50*S+c*35*S);
+    }
+  }
+
+  // Back wall shelving (right of cooking line)
+  const bShelfX=RW/4;
+  for(let lv=0;lv<4;lv++){
+    const bShelf=B(RW/4,4*S,30*S,steel()); bShelf.position.set(bShelfX,80*S+lv*70*S,-RD/2+15*S+WT);
+    for(let c=0;c<3;c++){
+      const container=B(28*S,25*S,22*S,brushed()); container.position.set(bShelfX-35*S+c*35*S,95*S+lv*70*S,-RD/2+15*S+WT);
+    }
+  }
+}
+
+// ── OVERHEAD POT RACK ──────────────────────────────────────
+function buildOverheadRacks(){
+  // Ceiling-mounted pot rack over prep area
+  const rackY=RH-50*S;
+  const rackZ=RD/4;
+  // Frame
+  const frame1=B(200*S,6*S,6*S,darkSteel()); frame1.position.set(0,rackY,rackZ);
+  const frame2=B(200*S,6*S,6*S,darkSteel()); frame2.position.set(0,rackY,rackZ+50*S);
+  const crossBar=B(6*S,6*S,50*S,darkSteel()); crossBar.position.set(-80*S,rackY,rackZ+25*S);
+  const crossBar2=crossBar.clone(); crossBar2.position.x=80*S; scene.add(crossBar2);
+  // Hanging chains to ceiling
+  [-80*S,80*S].forEach(cx=>{
+    [rackZ,rackZ+50*S].forEach(cz=>{
+      const chain=B(2*S,50*S,2*S,darkSteel()); chain.position.set(cx,rackY+28*S,cz);
+    });
+  });
+  // Pots and pans hanging
+  const hangPots=[
+    [-70*S,rackY-20*S,rackZ+10*S,24*S,20*S,potMat()],
+    [0,rackY-25*S,rackZ+10*S,20*S,28*S,copper()],
+    [60*S,rackY-18*S,rackZ+10*S,22*S,18*S,potMat()],
+    [-30*S,rackY-22*S,rackZ+40*S,16*S,16*S,copper()],
+    [40*S,rackY-20*S,rackZ+40*S,14*S,22*S,potMat()],
+  ];
+  hangPots.forEach(([px,py,pz,r,h,m])=>{
+    const hook=C(1.5*S,1.5*S,12*S,6,steel()); hook.position.set(px,py+h/2+8*S,pz);
+    const pot=C(r,r*0.85,h,12,m); pot.position.set(px,py,pz);
+  });
+
+  // Ladles and utensils hanging
+  [-100*S,-60*S,-20*S,20*S,60*S,100*S].forEach((ux,i)=>{
+    const uHook=C(1*S,1*S,8*S,6,darkSteel()); uHook.position.set(ux,rackY-5*S,rackZ+25*S);
+    const uHandle=B(3*S,30*S,3*S,black()); uHandle.position.set(ux,rackY-25*S,rackZ+25*S);
+    const uHead=B(i%2===0?12*S:8*S,i%2===0?8*S:12*S,2*S,steel());
+    uHead.position.set(ux,rackY-42*S,rackZ+25*S);
+  });
+}
+
+// ── SWINGING DOORS ─────────────────────────────────────────
+function buildDoors(){
+  const doorW=220*S, doorH=RH;
+  const wallZ=RD/2-WT/2;
+  const gap=4*S, slabW=doorW/2-gap/2;
+  const dMat=new THREE.MeshLambertMaterial({color:0x3d5a3d}); // green kitchen doors
+  const dTrim=new THREE.MeshLambertMaterial({color:0x1a2a1a});
+  const portholeMat=glassMat();
+
+  [-1,1].forEach(s=>{
+    const jamb=new THREE.Mesh(new THREE.BoxGeometry(10*S,doorH,WT+4*S),dTrim);
+    jamb.position.set(s*(doorW/2+5*S),doorH/2,wallZ); scene.add(jamb);
+    const cx=s*(gap/2+slabW/2);
+    const slab=new THREE.Mesh(new THREE.BoxGeometry(slabW,doorH,8*S),dMat);
+    slab.position.set(cx,doorH/2,wallZ+2*S); scene.add(slab);
+    // Porthole window
+    const port=new THREE.Mesh(new THREE.CylinderGeometry(18*S,18*S,4*S,16),portholeMat);
+    port.rotation.x=Math.PI/2; port.position.set(cx,doorH*0.7,wallZ+5*S); scene.add(port);
+    const portRim=new THREE.Mesh(new THREE.CylinderGeometry(20*S,20*S,3*S,16),dTrim);
+    portRim.rotation.x=Math.PI/2; portRim.position.set(cx,doorH*0.7,wallZ+4*S); scene.add(portRim);
+    // Kick plate
+    const kick=new THREE.Mesh(new THREE.BoxGeometry(slabW,20*S,5*S),brushed());
+    kick.position.set(cx,10*S,wallZ+5*S); scene.add(kick);
+    // Push plate
+    const push=new THREE.Mesh(new THREE.BoxGeometry(slabW-20*S,10*S,5*S),brushed());
+    push.position.set(cx,doorH*0.45,wallZ+6*S); scene.add(push);
+  });
+  // Gap strip
+  const gapStrip=new THREE.Mesh(new THREE.BoxGeometry(gap,doorH,WT+6*S),dTrim);
+  gapStrip.position.set(0,doorH/2,wallZ+1*S); scene.add(gapStrip);
+
+  // "KITCHEN" sign above door
+  const sign=B(180*S,24*S,6*S,red()); sign.position.set(0,RH+12*S,wallZ+3*S);
+}
+
+// ── EXIT ───────────────────────────────────────────────────
+const exitCooldown=(new URLSearchParams(window.location.search).get('from')==='floor1')?Date.now()+3000:0;
+
+function checkExitDoor(){
+  if(exitTriggered)return; if(Date.now()<exitCooldown)return;
+  nearExit=camera.position.x>-120*S&&camera.position.x<120*S&&camera.position.z>RD/2-90*S;
+  const hint=document.getElementById('doorHint');
+  if(hint)hint.style.display=nearExit?'block':'none';
+}
+
+function updateRotation(){camera.rotation.order='YXZ';camera.rotation.set(0,yaw,0);}
+
+function onKeyDown(e){
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if(e.code==='KeyE'&&nearExit&&!exitTriggered&&!EDIT_MODE){
+    exitTriggered=true;
+    document.getElementById('doorHint').style.display='none';
+    document.getElementById('exitFade').classList.add('show');
+    if(window.SoundSystem)SoundSystem.play('doorOpen');
+    setTimeout(()=>window.location.href='floor1.html?from=kitchen',600);
+    return;
+  }
+  // Edit mode controls
+  if(EDIT_MODE&&selectedObj){
+    const step=5*S, rotStep=Math.PI/12;
+    if(e.code==='ArrowLeft'){e.preventDefault();selectedObj.position.x-=step;}
+    if(e.code==='ArrowRight'){e.preventDefault();selectedObj.position.x+=step;}
+    if(e.code==='ArrowUp'&&!e.shiftKey){e.preventDefault();selectedObj.position.z-=step;}
+    if(e.code==='ArrowDown'&&!e.shiftKey){e.preventDefault();selectedObj.position.z+=step;}
+    if(e.code==='ArrowUp'&&e.shiftKey){e.preventDefault();selectedObj.position.y+=step;}
+    if(e.code==='ArrowDown'&&e.shiftKey){e.preventDefault();selectedObj.position.y-=step;}
+    if(e.code==='KeyR'){selectedObj.rotation.y+=rotStep;}
+    if(e.code==='Escape'){deselect();}
+    if(e.code==='Delete'||e.code==='Backspace'){
+      scene.remove(selectedObj);
+      editableObjects=editableObjects.filter(o=>o!==selectedObj);
+      deselect();
+    }
+    updateSelInfo();
+    return;
+  }
+  if(EDIT_MODE)return; // block movement in edit mode
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=true;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=true;
+  if(e.code==='ArrowLeft')turnLeft=true;
+  if(e.code==='ArrowRight')turnRight=true;
+}
+function onKeyUp(e){
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=false;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=false;
+  if(e.code==='ArrowLeft')turnLeft=false;
+  if(e.code==='ArrowRight')turnRight=false;
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const delta=(performance.now()-prevTime)/1000; prevTime=performance.now();
+  if(turnLeft)yaw+=2.0*delta; if(turnRight)yaw-=2.0*delta;
+  const mv=Number(moveForward)-Number(moveBackward);
+  if(mv!==0&&window.SoundSystem)SoundSystem.footstep();
+  const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  camera.position.x+=fwd.x*mv*200*delta;
+  camera.position.z+=fwd.z*mv*200*delta;
+  camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2-20*S,camera.position.x));
+  camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-15*S,camera.position.z));
+  camera.position.y=190*S;
+  checkExitDoor(); updateRotation(); renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+// engine scripts loaded below
+</script>
+<script src="sound-system.js"></script>
+<script src="mystery-engine.js"></script>
+<script src="mystery-state.js"></script>
+<script src="mystery-ui.js"></script>
+<script src="evidence-system.js"></script>
+<script>
+(async () => {
+  await MysteryEngine.init();
+  let scenario = await MysteryState.load();
+  const isNew = !scenario;
+  if (isNew) { scenario = MysteryEngine.generate(); await MysteryState.save(scenario); }
+  window._scenario = scenario;
+  MysteryUI.init(scenario, isNew);
+  MysteryUI.setZone('kitchen');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'kitchen' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

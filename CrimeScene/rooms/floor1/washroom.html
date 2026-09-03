@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Victorian Bathroom</title>
+<style>
+#exitFade { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; z-index: 9999; transition: opacity 0.6s ease; }
+#exitFade.show { opacity: 1; }
+#doorHint { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); padding: 10px 24px; background: rgba(0,0,0,0.85); color: #ffdd88; border-radius: 8px; font-size: 17px; display: none; z-index: 50; font-family: system-ui, Arial, sans-serif; }
+#instructionLine {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  padding: 8px 16px; font-size: 14px; color: #eee;
+  background: rgba(0,0,0,0.6); border-radius: 6px; z-index: 30;
+  pointer-events: none; white-space: nowrap;
+}
+body { margin: 0; overflow: hidden; background: #000; font-family: Arial, sans-serif; }
+#info {
+  position: absolute; top: 15px; left: 15px; color: #ddd; font-size: 14px;
+  background: rgba(0,0,0,0.7); padding: 10px; border-radius: 6px; z-index: 10;
+}
+canvas { display: block; }
+#fadeOverlay { position: fixed; inset: 0; background: #000; z-index: 9999; animation: fadeOut 0.8s ease forwards; }
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+
+/* Edit panel */
+#editToggle {
+  position: fixed; bottom: 18px; right: 18px; z-index: 100;
+  background: #3a2010; color: #e8c87a; border: 1px solid #b8860b;
+  padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px;
+}
+#editPanel {
+  position: fixed; top: 0; right: -320px; width: 300px; height: 100vh;
+  background: #1a0e06; color: #e0c88a; z-index: 200;
+  transition: right 0.3s ease; overflow-y: auto; box-sizing: border-box;
+  border-left: 1px solid #3a2010;
+}
+#editPanel.open { right: 0; }
+#editHeader {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 16px; background: #2a1408; border-bottom: 1px solid #3a2010; font-weight: bold;
+}
+#editClose { background: none; border: none; color: #e0c88a; font-size: 18px; cursor: pointer; }
+.piece-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; padding: 10px; }
+.piece-btn {
+  background: #2a1408; color: #c8a060; border: 1px solid #3a2010;
+  padding: 8px 4px; border-radius: 4px; cursor: pointer; font-size: 11px;
+  text-align: center; line-height: 1.3;
+}
+.piece-btn:hover, .piece-btn.active { background: #3a2010; border-color: #b8860b; color: #e8c87a; }
+.ctrl-group { padding: 10px 14px; border-top: 1px solid #2a1408; }
+.ctrl-label { font-size: 11px; color: #a08040; display: block; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 1px; }
+.ctrl-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ctrl-row label { font-size: 12px; color: #a08040; width: 16px; flex-shrink: 0; }
+.ctrl-row input[type=range] { flex: 1; }
+.ctrl-val { font-size: 12px; width: 36px; text-align: right; font-variant-numeric: tabular-nums; }
+.action-btn {
+  width: 100%; padding: 7px; margin-top: 6px; border-radius: 4px; cursor: pointer;
+  border: 1px solid #3a2010; background: #2a1408; color: #c8a060; font-size: 12px;
+}
+.action-btn:hover { background: #3a2010; }
+.action-btn.danger { border-color: #6a2010; color: #e07050; }
+.hint { padding: 10px 14px; font-size: 11px; color: #806040; border-top: 1px solid #2a1408; }
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="doorHint">Press E — Return to Floor 1</div>
+<div id="instructionLine">Walk to the door (front) to exit</div>
+<div id="fadeOverlay"></div>
+<div id="info">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn</div>
+<button id="editToggle">⚙ Edit Room</button>
+
+<div id="editPanel">
+  <div id="editHeader"><span>Move &amp; Rotate</span><button id="editClose">✕</button></div>
+  <div class="piece-grid">
+    <button class="piece-btn active" data-piece="bath">Roll-top<br>Bath</button>
+    <button class="piece-btn" data-piece="basin">Wash<br>Basin</button>
+    <button class="piece-btn" data-piece="toilet">Toilet</button>
+    <button class="piece-btn" data-piece="towelrail">Towel<br>Rail</button>
+    <button class="piece-btn" data-piece="cabinet">Cabinet</button>
+    <button class="piece-btn" data-piece="print">Print</button>
+    <button class="piece-btn" data-piece="shower">Walk-in<br>Shower</button>
+  </div>
+  <div class="ctrl-group">
+    <span class="ctrl-label">Position &amp; Rotation</span>
+    <div class="ctrl-row"><label>X</label><input type="range" id="sl-x" min="-380" max="380" step="1" value="0"><span class="ctrl-val" id="val-x">0</span></div>
+    <div class="ctrl-row"><label>Z</label><input type="range" id="sl-z" min="-230" max="230" step="1" value="0"><span class="ctrl-val" id="val-z">0</span></div>
+    <div class="ctrl-row"><label>↻</label><input type="range" id="sl-r" min="0" max="359" step="1" value="0"><span class="ctrl-val" id="val-r">0°</span></div>
+    <button class="action-btn" id="resetBtn">Reset to Default</button>
+    <button class="action-btn danger" id="hideBtn">Hide / Show</button>
+  </div>
+  <div class="hint">Select a piece above, then drag sliders to reposition.</div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+let scene, camera, renderer;
+let moveForward=false, moveBackward=false, turnLeft=false, turnRight=false;
+let yaw=Math.PI, prevTime=performance.now();
+const S=0.5;
+const FURNITURE={};
+const SAVE_KEY='victorianbathroom_layout';
+
+// Room dims — wide enough for the shower
+const RW=820*S, RD=560*S, RH=340*S;
+
+// Materials
+let wallMat,brassMat,darkWood,whiteMat,chromeMat,porcelainMat,mirrorMat;
+
+function initMaterials(){
+  wallMat     =new THREE.MeshLambertMaterial({color:0xd4c9b0});
+  brassMat    =new THREE.MeshLambertMaterial({color:0xb8860b});
+  darkWood    =new THREE.MeshLambertMaterial({color:0x2c1a0e});
+  whiteMat    =new THREE.MeshLambertMaterial({color:0xf5f0eb});
+  chromeMat   =new THREE.MeshLambertMaterial({color:0xc8c0b0});
+  porcelainMat=new THREE.MeshLambertMaterial({color:0xfaf7f2});
+  mirrorMat   =new THREE.MeshLambertMaterial({color:0x8899aa,emissive:0x112233});
+}
+
+function reg(id,group,x,z,rotDeg){
+  group.position.set(x,0,z);
+  group.rotation.y=rotDeg*Math.PI/180;
+  scene.add(group);
+  FURNITURE[id]={group,defaults:{x,z,r:rotDeg}};
+}
+
+function saveLayout(){
+  const data={};
+  Object.keys(FURNITURE).forEach(id=>{
+    const f=FURNITURE[id];
+    data[id]={x:f.group.position.x,z:f.group.position.z,r:f.group.rotation.y,v:f.group.visible};
+  });
+  localStorage.setItem(SAVE_KEY,JSON.stringify(data));
+}
+function loadLayout(){
+  const raw=localStorage.getItem(SAVE_KEY); if(!raw)return;
+  try{
+    const data=JSON.parse(raw);
+    Object.keys(data).forEach(id=>{
+      const f=FURNITURE[id]; if(!f)return;
+      f.group.position.x=data[id].x; f.group.position.z=data[id].z;
+      f.group.rotation.y=data[id].r;
+      if(data[id].v===false)f.group.visible=false;
+    });
+  }catch(e){}
+}
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById('fadeOverlay');if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x0c0a08);
+  scene.fog=new THREE.Fog(0x0c0a08,200,750);
+  camera=new THREE.PerspectiveCamera(72,window.innerWidth/window.innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+  initMaterials();
+
+  // Lighting
+  scene.add(new THREE.AmbientLight(0x2a1a08,1.2));
+  const ceil1=new THREE.PointLight(0xffcc88,1.8,500); ceil1.position.set(0,RH-20*S,0); scene.add(ceil1);
+  const sconce=new THREE.PointLight(0xff9944,1.0,300); sconce.position.set(0,RH*0.65,-RD/2+20*S); scene.add(sconce);
+  const showerLight=new THREE.PointLight(0xffeedd,1.0,280); showerLight.position.set(RW/2-120*S,RH-20*S,-RD/2+120*S); scene.add(showerLight);
+
+  buildRoom();
+  loadLayout();
+  initEditPanel();
+
+  document.addEventListener('keydown',onKeyDown);
+  document.addEventListener('keyup',onKeyUp);
+  window.addEventListener('resize',onResize);
+
+  camera.position.set(0,190*S,RD/2-120*S);
+  yaw=0; updateRotation(); animate();
+}
+
+function buildRoom(){
+  const dadoH=100*S;
+
+  // Floor — chequerboard
+  const tSz=40*S;
+  const bTile=new THREE.MeshLambertMaterial({color:0x111008});
+  const wTile=new THREE.MeshLambertMaterial({color:0xe8e2d5});
+  for(let ix=0;ix<Math.ceil(RW/tSz);ix++)
+    for(let iz=0;iz<Math.ceil(RD/tSz);iz++){
+      const m=(ix+iz)%2===0?wTile:bTile;
+      const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-1*S,2*S,tSz-1*S),m);
+      t.position.set(-RW/2+tSz*(ix+0.5),1*S,-RD/2+tSz*(iz+0.5)); scene.add(t);
+    }
+
+  // Ceiling
+  const ceilMat=new THREE.MeshLambertMaterial({color:0xd8d0c0});
+  const ceil=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),ceilMat);
+  ceil.rotation.x=Math.PI/2; ceil.position.y=RH; scene.add(ceil);
+  // Ceiling rose
+  const rose=new THREE.Mesh(new THREE.CylinderGeometry(22*S,22*S,4*S,16),whiteMat);
+  rose.position.set(0,RH-2*S,0); scene.add(rose);
+  // Gas lamp
+  const rod=new THREE.Mesh(new THREE.CylinderGeometry(1.5*S,1.5*S,40*S,8),brassMat);
+  rod.position.set(0,RH-22*S,0); scene.add(rod);
+  const lampBase=new THREE.Mesh(new THREE.SphereGeometry(6*S,10,10),brassMat);
+  lampBase.position.set(0,RH-42*S,0); scene.add(lampBase);
+  const shade=new THREE.Mesh(new THREE.CylinderGeometry(14*S,8*S,18*S,16,1,true),
+    new THREE.MeshLambertMaterial({color:0xddcc88,side:THREE.DoubleSide,transparent:true,opacity:0.8}));
+  shade.position.set(0,RH-54*S,0); scene.add(shade);
+
+  // Walls
+  const backWall=new THREE.Mesh(new THREE.BoxGeometry(RW,RH,14*S),wallMat);
+  backWall.position.set(0,RH/2,-RD/2+7*S); scene.add(backWall);
+  const leftWall=new THREE.Mesh(new THREE.BoxGeometry(14*S,RH,RD),wallMat);
+  leftWall.position.set(-RW/2+7*S,RH/2,0); scene.add(leftWall);
+  const rightWall=leftWall.clone(); rightWall.position.x=RW/2-7*S; scene.add(rightWall);
+  // Double doors — two separate slabs with visible gap
+  const doorW=240*S, doorH=RH;
+  const fSideW=(RW-doorW)/2;
+  const fL=new THREE.Mesh(new THREE.BoxGeometry(fSideW,RH,14*S),wallMat);
+  fL.position.set(-(doorW/2+fSideW/2),RH/2,RD/2-7*S); scene.add(fL);
+  const fR=fL.clone(); fR.position.x=doorW/2+fSideW/2; scene.add(fR);
+  // No fTop — door goes to ceiling
+
+  // Dado tiles
+  const dadoTile=new THREE.MeshLambertMaterial({color:0xddd5c8});
+  const dBack=new THREE.Mesh(new THREE.BoxGeometry(RW,dadoH,16*S),dadoTile);
+  dBack.position.set(0,dadoH/2,-RD/2+8*S); scene.add(dBack);
+  const dLeft=new THREE.Mesh(new THREE.BoxGeometry(16*S,dadoH,RD),dadoTile);
+  dLeft.position.set(-RW/2+8*S,dadoH/2,0); scene.add(dLeft);
+  const dRight=dLeft.clone(); dRight.position.x=RW/2-8*S; scene.add(dRight);
+  [-1,1].forEach(s=>{
+    const d=new THREE.Mesh(new THREE.BoxGeometry(fSideW,dadoH,16*S),dadoTile);
+    d.position.set(s*(doorW/2+fSideW/2),dadoH/2,RD/2-8*S); scene.add(d);
+  });
+  // Dado rail
+  [[new THREE.BoxGeometry(RW+14*S,6*S,10*S),0,dadoH+3*S,-RD/2+9*S],
+   [new THREE.BoxGeometry(10*S,6*S,RD),-RW/2+9*S,dadoH+3*S,0],
+   [new THREE.BoxGeometry(10*S,6*S,RD), RW/2-9*S,dadoH+3*S,0],
+  ].forEach(([geo,x,y,z])=>{const m=new THREE.Mesh(geo,brassMat);m.position.set(x,y,z);scene.add(m);});
+  [-1,1].forEach(s=>{
+    const r=new THREE.Mesh(new THREE.BoxGeometry(fSideW,6*S,10*S),brassMat);
+    r.position.set(s*(doorW/2+fSideW/2),dadoH+3*S,RD/2-9*S); scene.add(r);
+  });
+
+  (()=>{
+    const woodMat=new THREE.MeshLambertMaterial({color:0x3d2010});
+    const raisedMat=new THREE.MeshLambertMaterial({color:0x2a1508});
+    const frameMat=darkWood;
+    const gap=4*S;           // gap between the two doors
+    const slabW=doorW/2-gap/2; // width of each door slab
+    const wallZ=RD/2-7*S;    // front wall face
+
+    // Outer frame jambs (left and right)
+    const jambH=doorH;
+    const jambW=10*S, jambD=14*S;
+    [-1,1].forEach(s=>{
+      const jamb=new THREE.Mesh(new THREE.BoxGeometry(jambW,jambH,jambD),frameMat);
+      jamb.position.set(s*(doorW/2+jambW/2),jambH/2,wallZ); scene.add(jamb);
+    });
+
+    // Two door slabs
+    [-1,1].forEach(s=>{
+      const cx=s*(gap/2+slabW/2);
+      // Main slab
+      const slab=new THREE.Mesh(new THREE.BoxGeometry(slabW,doorH,10*S),woodMat);
+      slab.position.set(cx,doorH/2,wallZ+2*S); scene.add(slab);
+      // Raised panels (top, middle, bottom)
+      [[doorH*0.75,doorH*0.18],[doorH*0.42,doorH*0.22],[doorH*0.12,doorH*0.16]].forEach(([py,ph])=>{
+        const panel=new THREE.Mesh(new THREE.BoxGeometry(slabW-16*S,ph,5*S),raisedMat);
+        panel.position.set(cx,py,wallZ+7*S); scene.add(panel);
+      });
+      // Brass knob on inner edge
+      const knobX=cx + s*(-slabW/2+8*S);
+      const knob=new THREE.Mesh(new THREE.SphereGeometry(5*S,10,10),brassMat);
+      knob.position.set(knobX,doorH*0.45,wallZ+8*S); scene.add(knob);
+      // Knob backplate
+      const plate=new THREE.Mesh(new THREE.CylinderGeometry(7*S,7*S,2*S,12),brassMat);
+      plate.rotation.x=Math.PI/2;
+      plate.position.set(knobX,doorH*0.45,wallZ+5*S); scene.add(plate);
+    });
+
+    // Visible dark gap strip between the two slabs
+    const gapStrip=new THREE.Mesh(new THREE.BoxGeometry(gap,doorH,16*S),
+      new THREE.MeshLambertMaterial({color:0x080400}));
+    gapStrip.position.set(0,doorH/2,wallZ+1*S); scene.add(gapStrip);
+  })();
+
+  // Mirror + sconces on back wall
+  const mirFrame=new THREE.Mesh(new THREE.BoxGeometry(160*S,140*S,10*S),brassMat);
+  mirFrame.position.set(0,dadoH+80*S,-RD/2+10*S); scene.add(mirFrame);
+  const mirror=new THREE.Mesh(new THREE.PlaneGeometry(148*S,128*S),mirrorMat);
+  mirror.position.set(0,dadoH+80*S,-RD/2+15*S); scene.add(mirror);
+  [-1,1].forEach(s=>{
+    const arm=new THREE.Mesh(new THREE.BoxGeometry(20*S,4*S,4*S),brassMat);
+    arm.position.set(s*100*S,dadoH+140*S,-RD/2+16*S); scene.add(arm);
+    const globe=new THREE.Mesh(new THREE.SphereGeometry(7*S,10,10),
+      new THREE.MeshLambertMaterial({color:0xffeecc,emissive:0x886622}));
+    globe.position.set(s*112*S,dadoH+140*S,-RD/2+16*S); scene.add(globe);
+  });
+
+  // ── FIXTURES (registered as movable groups) ──
+
+  // Roll-top bath
+  (function(){
+    const g=new THREE.Group();
+    const bW=160*S,bLen=70*S,bH=44*S;
+    const outer=new THREE.Mesh(new THREE.BoxGeometry(bLen,bH,bW),new THREE.MeshLambertMaterial({color:0xf2eee8}));
+    outer.position.set(0,bH/2+28*S,0); g.add(outer);
+    const inner=new THREE.Mesh(new THREE.BoxGeometry(bLen-10*S,bH-8*S,bW-14*S),new THREE.MeshLambertMaterial({color:0xe8e0d8}));
+    inner.position.set(0,bH/2+34*S,0); g.add(inner);
+    const rim=new THREE.Mesh(new THREE.BoxGeometry(bLen+6*S,8*S,bW+6*S),new THREE.MeshLambertMaterial({color:0xf5f0ea}));
+    rim.position.set(0,bH+28*S,0); g.add(rim);
+    [[bLen/2-10*S,bW/2-12*S],[bLen/2-10*S,-(bW/2-12*S)],[-(bLen/2-10*S),bW/2-12*S],[-(bLen/2-10*S),-(bW/2-12*S)]].forEach(([ox,oz])=>{
+      const foot=new THREE.Mesh(new THREE.CylinderGeometry(5*S,7*S,28*S,8),brassMat);
+      foot.position.set(ox,14*S,oz); g.add(foot);
+      const claw=new THREE.Mesh(new THREE.SphereGeometry(7*S,8,6),brassMat);
+      claw.position.set(ox,3*S,oz); g.add(claw);
+    });
+    const tapPipe=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,20*S,6),brassMat);
+    tapPipe.rotation.z=Math.PI/2; tapPipe.position.set(0,bH+38*S,-bW/2+20*S); g.add(tapPipe);
+    const spout=new THREE.Mesh(new THREE.CylinderGeometry(1.5*S,1.5*S,16*S,6),brassMat);
+    spout.rotation.x=Math.PI/4; spout.position.set(0,bH+44*S,-bW/2+22*S); g.add(spout);
+    [-1,1].forEach(s=>{
+      const tap=new THREE.Mesh(new THREE.CylinderGeometry(3*S,3*S,6*S,8),brassMat);
+      tap.position.set(s*10*S,bH+38*S,-bW/2+20*S); g.add(tap);
+      const handle=new THREE.Mesh(new THREE.BoxGeometry(12*S,3*S,3*S),brassMat);
+      handle.position.set(s*10*S,bH+44*S,-bW/2+20*S); g.add(handle);
+    });
+    reg('bath',g,-RW/2+100*S,-40*S,0);
+  })();
+
+  // Pedestal washbasin
+  (function(){
+    const g=new THREE.Group();
+    const ped=new THREE.Mesh(new THREE.CylinderGeometry(12*S,14*S,70*S,12),porcelainMat);
+    ped.position.set(0,35*S,0); g.add(ped);
+    const basin=new THREE.Mesh(new THREE.CylinderGeometry(28*S,22*S,14*S,16),porcelainMat);
+    basin.position.set(0,77*S,0); g.add(basin);
+    const basinRim=new THREE.Mesh(new THREE.TorusGeometry(27*S,3*S,8,24),porcelainMat);
+    basinRim.rotation.x=Math.PI/2; basinRim.position.set(0,84*S,0); g.add(basinRim);
+    const tapPost=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,14*S,8),brassMat);
+    tapPost.position.set(0,89*S,-14*S); g.add(tapPost);
+    const tapHead=new THREE.Mesh(new THREE.BoxGeometry(14*S,3*S,5*S),brassMat);
+    tapHead.position.set(0,97*S,-14*S); g.add(tapHead);
+    reg('basin',g,0,-RD/2+50*S,0);
+  })();
+
+  // Toilet
+  (function(){
+    const g=new THREE.Group();
+    const base=new THREE.Mesh(new THREE.BoxGeometry(44*S,42*S,52*S),porcelainMat);
+    base.position.set(0,21*S,0); g.add(base);
+    const seat=new THREE.Mesh(new THREE.BoxGeometry(40*S,4*S,46*S),new THREE.MeshLambertMaterial({color:0xd8d0c4}));
+    seat.position.set(0,44*S,0); g.add(seat);
+    const cistern=new THREE.Mesh(new THREE.BoxGeometry(40*S,44*S,18*S),porcelainMat);
+    cistern.position.set(0,64*S,-19*S); g.add(cistern);
+    const cisternLid=new THREE.Mesh(new THREE.BoxGeometry(42*S,5*S,20*S),porcelainMat);
+    cisternLid.position.set(0,87*S,-19*S); g.add(cisternLid);
+    const chain=new THREE.Mesh(new THREE.CylinderGeometry(1*S,1*S,30*S,4),chromeMat);
+    chain.position.set(0,70*S,-10*S); g.add(chain);
+    const pull=new THREE.Mesh(new THREE.SphereGeometry(4*S,8,6),porcelainMat);
+    pull.position.set(0,54*S,-10*S); g.add(pull);
+    reg('toilet',g,RW/2-70*S,-100*S,0);
+  })();
+
+  // Towel rail
+  (function(){
+    const g=new THREE.Group();
+    const post1=new THREE.Mesh(new THREE.CylinderGeometry(2.5*S,2.5*S,60*S,8),brassMat);
+    post1.position.set(0,dadoH+40*S,-30*S); g.add(post1);
+    const post2=post1.clone(); post2.position.z=30*S; g.add(post2);
+    const rail1=new THREE.Mesh(new THREE.CylinderGeometry(1.5*S,1.5*S,60*S,8),brassMat);
+    rail1.rotation.z=Math.PI/2; rail1.position.set(0,dadoH+30*S,0); g.add(rail1);
+    const rail2=rail1.clone(); rail2.position.y=dadoH+60*S; g.add(rail2);
+    const towel=new THREE.Mesh(new THREE.BoxGeometry(6*S,26*S,50*S),new THREE.MeshLambertMaterial({color:0xc8b89a}));
+    towel.position.set(0,dadoH+44*S,0); g.add(towel);
+    reg('towelrail',g,RW/2-16*S,80*S,0);
+  })();
+
+  // Cabinet
+  (function(){
+    const g=new THREE.Group();
+    const cab=new THREE.Mesh(new THREE.BoxGeometry(60*S,90*S,36*S),darkWood);
+    cab.position.set(0,45*S,0); g.add(cab);
+    const cabTop=new THREE.Mesh(new THREE.BoxGeometry(64*S,5*S,40*S),darkWood);
+    cabTop.position.set(0,92*S,0); g.add(cabTop);
+    [0.35,0.65].forEach(t=>{
+      const drawer=new THREE.Mesh(new THREE.BoxGeometry(52*S,28*S,34*S),new THREE.MeshLambertMaterial({color:0x3d2010}));
+      drawer.position.set(0,90*S*t,1*S); g.add(drawer);
+      const pull=new THREE.Mesh(new THREE.SphereGeometry(3*S,6,6),brassMat);
+      pull.position.set(0,90*S*t,18*S); g.add(pull);
+    });
+    const bottle=new THREE.Mesh(new THREE.CylinderGeometry(5*S,5*S,22*S,8),new THREE.MeshLambertMaterial({color:0x4a6b44,transparent:true,opacity:0.85}));
+    bottle.position.set(-12*S,103*S,0); g.add(bottle);
+    const bottleCap=new THREE.Mesh(new THREE.CylinderGeometry(3*S,5*S,5*S,8),brassMat);
+    bottleCap.position.set(-12*S,116*S,0); g.add(bottleCap);
+    reg('cabinet',g,RW/2-55*S,-RD/2+55*S,0);
+  })();
+
+  // Botanical print
+  (function(){
+    const g=new THREE.Group();
+    const frame=new THREE.Mesh(new THREE.BoxGeometry(8*S,90*S,70*S),darkWood);
+    frame.position.set(0,0,0); g.add(frame);
+    const print=new THREE.Mesh(new THREE.PlaneGeometry(58*S,78*S),new THREE.MeshLambertMaterial({color:0x6b8c5a}));
+    print.rotation.y=Math.PI/2; print.position.set(5*S,0,0); g.add(print);
+    reg('print',g,-RW/2+10*S,dadoH+110*S-80*S,0);
+    // y offset: group is at y=0, so offset the mesh
+    FURNITURE['print'].group.position.y=dadoH+110*S;
+  })();
+
+  // ── Walk-in shower — back-right corner ──
+  (function(){
+    const g=new THREE.Group();
+    const sW=194*S;   // width along Z axis (depth into room)
+    const sD=176*S;   // depth along X axis (from right wall)
+    const sH=RH;
+
+    // Slate floor inside shower
+    const slateL=new THREE.MeshLambertMaterial({color:0x3a3530});
+    const slateD=new THREE.MeshLambertMaterial({color:0x252220});
+    const stSz=28*S;
+    for(let ix=0;ix<Math.ceil(sD/stSz);ix++)
+      for(let iz=0;iz<Math.ceil(sW/stSz);iz++){
+        const mat=(ix+iz)%2===0?slateL:slateD;
+        const t=new THREE.Mesh(new THREE.BoxGeometry(stSz-1*S,3*S,stSz-1*S),mat);
+        t.position.set(-sD/2+stSz*(ix+0.5),2*S,-sW/2+stSz*(iz+0.5)); g.add(t);
+      }
+
+    // Tiled back wall (right-wall side)
+    const shTile=new THREE.MeshLambertMaterial({color:0x2a2520});
+    const swR=new THREE.Mesh(new THREE.BoxGeometry(6*S,sH,sW),shTile);
+    swR.position.set(sD/2-3*S,sH/2,0); g.add(swR);
+    // Tiled back wall (back-wall side)
+    const swB=new THREE.Mesh(new THREE.BoxGeometry(sD,sH,6*S),shTile);
+    swB.position.set(0,sH/2,-sW/2+3*S); g.add(swB);
+    // Grout lines on back tile wall
+    for(let row=0;row<11;row++){
+      const gr=new THREE.Mesh(new THREE.BoxGeometry(sD,1.5*S,7*S),new THREE.MeshLambertMaterial({color:0x111010}));
+      gr.position.set(0,row*30*S+15*S,-sW/2+4*S); g.add(gr);
+    }
+    // Grout columns
+    for(let col=0;col<7;col++){
+      const gc=new THREE.Mesh(new THREE.BoxGeometry(1.5*S,sH,7*S),new THREE.MeshLambertMaterial({color:0x111010}));
+      gc.position.set(-sD/2+col*30*S+15*S,sH/2,-sW/2+4*S); g.add(gc);
+    }
+
+    // Glass panels — front face (along Z=sW/2)
+    const glassMat=new THREE.MeshLambertMaterial({color:0xaaccbb,transparent:true,opacity:0.2,side:THREE.DoubleSide});
+    // Fixed panel (larger, left side)
+    const gFront=new THREE.Mesh(new THREE.PlaneGeometry(sD*0.62,sH-20*S),glassMat);
+    gFront.position.set(-sD*0.19,sH/2,sW/2); g.add(gFront);
+    // Entry gap then small panel right
+    const gFront2=new THREE.Mesh(new THREE.PlaneGeometry(sD*0.2,sH-20*S),glassMat);
+    gFront2.position.set(sD/2-sD*0.1-2*S,sH/2,sW/2); g.add(gFront2);
+    // Side panel (left face — open entry between panels)
+    const gSide=new THREE.Mesh(new THREE.PlaneGeometry(sW*0.55,sH-20*S),glassMat);
+    gSide.rotation.y=Math.PI/2; gSide.position.set(-sD/2,sH/2,sW*0.22); g.add(gSide);
+
+    // Brass frame posts & rails
+    const posts=[
+      [-sD/2,sW/2],[-sD*0.5*0.38+sD*0.19,sW/2],[sD/2,sW/2],[-sD/2,sW*0.22-sW*0.275],
+    ];
+    posts.forEach(([px,pz])=>{
+      const post=new THREE.Mesh(new THREE.BoxGeometry(5*S,sH-20*S,5*S),brassMat);
+      post.position.set(px,(sH-20*S)/2+10*S,pz); g.add(post);
+    });
+    // Top rail front
+    const rTop=new THREE.Mesh(new THREE.BoxGeometry(sD,5*S,5*S),brassMat);
+    rTop.position.set(0,sH-12*S,sW/2); g.add(rTop);
+    const rBot=rTop.clone(); rBot.position.y=5*S; g.add(rBot);
+    // Side top rail
+    const srTop=new THREE.Mesh(new THREE.BoxGeometry(5*S,5*S,sW*0.55),brassMat);
+    srTop.position.set(-sD/2,sH-12*S,sW*0.22-sW*0.275/2); g.add(srTop);
+    const srBot=srTop.clone(); srBot.position.y=5*S; g.add(srBot);
+
+    // Rainfall head — ceiling mount
+    const armH=sH-18*S;
+    const ceilArm=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,60*S,8),brassMat);
+    ceilArm.rotation.z=Math.PI/2; ceilArm.position.set(20*S,armH,-20*S); g.add(ceilArm);
+    const dropPipe=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,35*S,8),brassMat);
+    dropPipe.position.set(50*S,armH-18*S,-20*S); g.add(dropPipe);
+    const rainHead=new THREE.Mesh(new THREE.CylinderGeometry(26*S,26*S,5*S,24),brassMat);
+    rainHead.position.set(50*S,armH-38*S,-20*S); g.add(rainHead);
+    const headFace=new THREE.Mesh(new THREE.CylinderGeometry(24*S,24*S,2*S,24),new THREE.MeshLambertMaterial({color:0x6b5010}));
+    headFace.position.set(50*S,armH-41*S,-20*S); g.add(headFace);
+
+    // Wall-mounted controls (on right wall side)
+    const ctrlX=sD/2-6*S, ctrlZ=-30*S, ctrlY=140*S;
+    const plate=new THREE.Mesh(new THREE.BoxGeometry(6*S,54*S,40*S),brassMat);
+    plate.position.set(ctrlX,ctrlY,ctrlZ); g.add(plate);
+    [-14*S,14*S].forEach(oz=>{
+      const knob=new THREE.Mesh(new THREE.CylinderGeometry(7*S,7*S,8*S,12),brassMat);
+      knob.rotation.z=Math.PI/2; knob.position.set(ctrlX+4*S,ctrlY,ctrlZ+oz); g.add(knob);
+      const ind=new THREE.Mesh(new THREE.BoxGeometry(2*S,3*S,12*S),new THREE.MeshLambertMaterial({color:0xf0e8d0}));
+      ind.position.set(ctrlX+9*S,ctrlY,ctrlZ+oz); g.add(ind);
+    });
+
+    // Hand shower riser rail (on right-wall side)
+    const riserX=sD/2-8*S, riserZ=50*S;
+    const riser=new THREE.Mesh(new THREE.CylinderGeometry(1.5*S,1.5*S,130*S,8),brassMat);
+    riser.position.set(riserX,95*S,riserZ); g.add(riser);
+    const slide=new THREE.Mesh(new THREE.BoxGeometry(5*S,10*S,8*S),brassMat);
+    slide.position.set(riserX,150*S,riserZ); g.add(slide);
+    const handHead=new THREE.Mesh(new THREE.BoxGeometry(8*S,5*S,28*S),brassMat);
+    handHead.position.set(riserX-5*S,150*S,riserZ); g.add(handHead);
+    const hose=new THREE.Mesh(new THREE.CylinderGeometry(1*S,1*S,30*S,6),chromeMat);
+    hose.rotation.x=Math.PI/5; hose.position.set(riserX-5*S,130*S,riserZ+8*S); g.add(hose);
+
+    // Niche shelf in back wall
+    const nicheMat=new THREE.MeshLambertMaterial({color:0x3d3530});
+    const niche=new THREE.Mesh(new THREE.BoxGeometry(sD*0.45,20*S,18*S),nicheMat);
+    niche.position.set(20*S,165*S,-sW/2+8*S); g.add(niche);
+    const soap=new THREE.Mesh(new THREE.BoxGeometry(12*S,8*S,8*S),new THREE.MeshLambertMaterial({color:0x8b7355}));
+    soap.position.set(10*S,175*S,-sW/2+8*S); g.add(soap);
+    const sBottle=new THREE.Mesh(new THREE.CylinderGeometry(4*S,4*S,20*S,8),new THREE.MeshLambertMaterial({color:0x2c4a3e,transparent:true,opacity:0.9}));
+    sBottle.position.set(30*S,175*S,-sW/2+8*S); g.add(sBottle);
+
+    // Bench seat in corner
+    const bench=new THREE.Mesh(new THREE.BoxGeometry(sD*0.5,16*S,sW*0.3),new THREE.MeshLambertMaterial({color:0x2c1a0e}));
+    bench.position.set(-sD/2+sD*0.25,16*S,-sW/2+sW*0.15); g.add(bench);
+    const benchLeg1=new THREE.Mesh(new THREE.BoxGeometry(6*S,28*S,6*S),brassMat);
+    benchLeg1.position.set(-sD/2+12*S,14*S,-sW/2+12*S); g.add(benchLeg1);
+    const benchLeg2=benchLeg1.clone(); benchLeg2.position.z=-sW/2+sW*0.3-12*S; g.add(benchLeg2);
+
+    // Place shower: back-right corner
+    reg('shower',g,RW/2-176*S/2,-RD/2+194*S/2,0);
+  })();
+}
+
+function onResize(){
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+}
+function updateRotation(){
+  camera.rotation.order='YXZ';
+  camera.rotation.set(0,yaw,0);
+}
+function onKeyDown(e){
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if(e.code==='KeyE'&&nearExit&&!exitTriggered){
+    exitTriggered=true;
+    document.getElementById('doorHint').style.display='none';
+    document.getElementById('exitFade').classList.add('show');
+    setTimeout(()=>window.location.href='floor1.html?from=Washroom',600);
+    return;
+  }
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=true;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=true;
+  if(e.code==='ArrowLeft')turnLeft=true;
+  if(e.code==='ArrowRight')turnRight=true;
+}
+function onKeyUp(e){
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=false;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=false;
+  if(e.code==='ArrowLeft')turnLeft=false;
+  if(e.code==='ArrowRight')turnRight=false;
+}
+
+const exitCooldown=(new URLSearchParams(window.location.search).get('from')==='floor1')?Date.now()+3000:0;
+let exitTriggered=false;
+let nearExit=false;
+function checkExitDoor(){
+  if(exitTriggered)return;
+  if(Date.now()<exitCooldown)return;
+  nearExit=camera.position.x>-70*S&&camera.position.x<70*S&&camera.position.z>RD/2-80*S;
+  const hint=document.getElementById('doorHint');
+  if(hint)hint.style.display=nearExit?'block':'none';
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const delta=(performance.now()-prevTime)/1000;
+  prevTime=performance.now();
+  if(turnLeft)yaw+=2.7*delta;
+  if(turnRight)yaw-=2.7*delta;
+  const moveZ=Number(moveForward)-Number(moveBackward);
+  if(moveZ!==0&&window.SoundSystem)SoundSystem.footstep();
+  const forward=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  camera.position.x+=forward.x*moveZ*90*delta;
+  camera.position.z+=forward.z*moveZ*90*delta;
+  camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2-20*S,camera.position.x));
+  camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-10*S,camera.position.z));
+  camera.position.y=190*S;
+  checkExitDoor(); updateRotation(); renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+// ── Edit panel ──
+function initEditPanel(){
+  let sel='bath';
+  const slX=document.getElementById('sl-x');
+  const slZ=document.getElementById('sl-z');
+  const slR=document.getElementById('sl-r');
+  const valX=document.getElementById('val-x');
+  const valZ=document.getElementById('val-z');
+  const valR=document.getElementById('val-r');
+
+  function sync(){
+    const f=FURNITURE[sel]; if(!f)return;
+    slX.value=Math.round(f.group.position.x);
+    slZ.value=Math.round(f.group.position.z);
+    const deg=Math.round(f.group.rotation.y*180/Math.PI+720)%360;
+    slR.value=deg;
+    valX.textContent=slX.value; valZ.textContent=slZ.value; valR.textContent=deg+'°';
+    document.getElementById('hideBtn').textContent=f.group.visible?'Hide / Show':'Show (hidden)';
+  }
+  function apply(){
+    const f=FURNITURE[sel]; if(!f)return;
+    f.group.position.x=parseFloat(slX.value);
+    f.group.position.z=parseFloat(slZ.value);
+    f.group.rotation.y=parseFloat(slR.value)*Math.PI/180;
+    valX.textContent=slX.value; valZ.textContent=slZ.value; valR.textContent=slR.value+'°';
+  }
+
+  document.querySelectorAll('.piece-btn').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      document.querySelectorAll('.piece-btn').forEach(b=>b.classList.remove('active'));
+      btn.classList.add('active');
+      sel=btn.dataset.piece;
+      sync();
+    });
+  });
+
+  slX.oninput=slZ.oninput=slR.oninput=()=>{ apply(); saveLayout(); };
+
+  document.getElementById('resetBtn').onclick=()=>{
+    const f=FURNITURE[sel]; if(!f)return;
+    const d=f.defaults;
+    f.group.position.set(d.x,f.group.position.y,d.z);
+    f.group.rotation.y=d.r*Math.PI/180;
+    sync(); saveLayout();
+  };
+  document.getElementById('hideBtn').onclick=()=>{
+    const f=FURNITURE[sel]; if(!f)return;
+    f.group.visible=!f.group.visible;
+    document.getElementById('hideBtn').textContent=f.group.visible?'Hide / Show':'Show (hidden)';
+    saveLayout();
+  };
+  document.getElementById('editToggle').onclick=()=>document.getElementById('editPanel').classList.toggle('open');
+  document.getElementById('editClose').onclick=()=>document.getElementById('editPanel').classList.remove('open');
+
+  sync();
+}
+
+init();
+</script>
+<script src="sound-system.js"></script>
+<script src="mystery-engine.js"></script>
+<script src="mystery-state.js"></script>
+<script src="mystery-ui.js"></script>
+<script src="evidence-system.js"></script>
+<script>
+(async () => {
+  await MysteryEngine.init();
+  let scenario = await MysteryState.load();
+  if (!scenario) { scenario = MysteryEngine.generate(); await MysteryState.save(scenario); }
+  window._scenario = scenario;
+  MysteryUI.init(scenario, false);
+  MysteryUI.setZone('washroom');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'washroom' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Freezer</title>
+<style>
+#exitFade { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; z-index: 9999; transition: opacity 0.6s ease; }
+#exitFade.show { opacity: 1; }
+#doorHint { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); padding: 10px 24px; background: rgba(0,0,0,0.85); color: #aaddff; border-radius: 8px; font-size: 17px; display: none; z-index: 50; font-family: system-ui, Arial, sans-serif; }
+#instructionLine { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); padding: 8px 16px; font-size: 14px; color: #cceeff; background: rgba(0,0,0,0.6); border-radius: 6px; z-index: 30; pointer-events: none; white-space: nowrap; }
+body { margin: 0; overflow: hidden; background: #000; }
+#fadeOverlay { position: fixed; inset: 0; background: #000; z-index: 9999; animation: fadeOut 0.8s ease forwards; }
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="doorHint">Press E — Return to Pantry</div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit</div>
+<div id="fadeOverlay"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+const RW=480, RD=480, RH=340, WT=14, PLAYER_Y=180, SPEED=180, TURN=2.0;
+let scene,camera,renderer;
+let moveForward=false,moveBackward=false,turnLeft=false,turnRight=false;
+let yaw=0,prevTime=performance.now(),nearExit=false,exitTriggered=false;
+
+function box(w,h,d,mat){const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat||new THREE.MeshLambertMaterial({color:0x888888}));return m;}
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById('fadeOverlay');if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x0a1a2a);
+  scene.fog=new THREE.Fog(0x0a1a2a,100,600);
+  camera=new THREE.PerspectiveCamera(72,innerWidth/innerHeight,0.1,1500);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(innerWidth,innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0x8ab4cc,0.7));
+  const fl1=new THREE.PointLight(0xcceeff,1.2,600); fl1.position.set(0,RH-20,-60); scene.add(fl1);
+  const fl2=new THREE.PointLight(0xcceeff,0.8,400); fl2.position.set(0,RH-20,60); scene.add(fl2);
+
+  buildRoom();
+
+  camera.position.set(0,PLAYER_Y,RD/2-60);
+  yaw=0; updateRotation();
+
+  document.addEventListener('keydown',onKeyDown);
+  document.addEventListener('keyup',onKeyUp);
+  window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+  animate();
+}
+
+function buildRoom(){
+  const wall=new THREE.MeshLambertMaterial({color:0x8ab4cc});
+  const floor=new THREE.MeshLambertMaterial({color:0x1a2a3a});
+  const ceil=new THREE.MeshLambertMaterial({color:0x6a8aa0});
+  const steel=new THREE.MeshLambertMaterial({color:0x8899aa});
+  const dark=new THREE.MeshLambertMaterial({color:0x445566});
+  const frost=new THREE.MeshLambertMaterial({color:0xddeeff,transparent:true,opacity:0.35});
+  const ice=new THREE.MeshLambertMaterial({color:0xaaddff,transparent:true,opacity:0.65});
+
+  // Floor, ceiling, walls
+  const fl=box(RW,4,RD,floor); fl.position.set(0,2,0); scene.add(fl);
+  const cl=box(RW,4,RD,ceil); cl.position.set(0,RH,0); scene.add(cl);
+  const bk=box(RW,RH,WT,wall); bk.position.set(0,RH/2,-RD/2+WT/2); scene.add(bk);
+  const lw=box(WT,RH,RD,wall); lw.position.set(-RW/2+WT/2,RH/2,0); scene.add(lw);
+  const rw=box(WT,RH,RD,wall); rw.position.set(RW/2-WT/2,RH/2,0); scene.add(rw);
+
+  // Front wall with door gap
+  const dW=100,dH=240,sW=(RW-dW)/2;
+  const fL=box(sW,RH,WT,wall); fL.position.set(-(dW/2+sW/2),RH/2,RD/2-WT/2); scene.add(fL);
+  const fR=box(sW,RH,WT,wall); fR.position.set(dW/2+sW/2,RH/2,RD/2-WT/2); scene.add(fR);
+  const fT=box(dW,RH-dH,WT,wall); fT.position.set(0,dH+(RH-dH)/2,RD/2-WT/2); scene.add(fT);
+
+  // Heavy insulated door (ajar)
+  const door=box(dW-6,dH-6,18,dark); door.position.set(-dW/2+6,dH/2,RD/2+8); door.rotation.y=0.5; scene.add(door);
+  const hdl=new THREE.Mesh(new THREE.CylinderGeometry(4,4,36,8),steel); hdl.rotation.z=Math.PI/2; hdl.position.set(30,dH/2-40,RD/2+18); scene.add(hdl);
+
+  // Ceiling light strips
+  for(const lx of[-80,80]){
+    const fix=box(110,8,28,steel); fix.position.set(lx,RH-2,0); scene.add(fix);
+    const cov=box(100,4,20,frost); cov.position.set(lx,RH-8,0); scene.add(cov);
+  }
+
+  // Shelving — left and right walls
+  for(const side of[-1,1]){
+    const sx=side*(RW/2-WT-30);
+    // uprights
+    for(const uz of[-140,0,140]){
+      const up=box(6,RH-30,6,dark); up.position.set(sx+side*30,RH/2,uz); scene.add(up);
+    }
+    // shelves with food
+    for(let s=1;s<=4;s++){
+      const sy=s*(RH-40)/5+20;
+      const sh=box(56,5,300,steel); sh.position.set(sx,sy,0); scene.add(sh);
+      addFood(sx,sy+5,side);
+    }
+  }
+
+  // Chest freezer at back
+  const chest=box(200,80,80,dark); chest.position.set(0,40,-RD/2+WT+44); scene.add(chest);
+  const lid=box(200,6,80,steel); lid.position.set(0,82,-RD/2+WT+44); lid.rotation.x=-0.15; scene.add(lid);
+  const cfrost=box(196,4,76,frost); cfrost.position.set(0,83,-RD/2+WT+44); scene.add(cfrost);
+
+  // Ice chunks on floor
+  for(let i=0;i<10;i++){
+    const ic=new THREE.Mesh(new THREE.DodecahedronGeometry(5+Math.random()*8,0),ice);
+    ic.position.set(-160+Math.random()*320,5,-160+Math.random()*320);
+    ic.rotation.set(Math.random()*Math.PI,Math.random()*Math.PI,Math.random()*Math.PI);
+    scene.add(ic);
+  }
+
+  // Frost patches on walls
+  for(let i=0;i<8;i++){
+    const fp=box(20+Math.random()*40,15+Math.random()*25,3,frost);
+    const side=Math.random()>0.5?1:-1;
+    fp.position.set(side*(RW/2-WT-1),40+Math.random()*220,-150+Math.random()*300);
+    scene.add(fp);
+  }
+
+  // Floor drain
+  const drain=new THREE.Mesh(new THREE.CylinderGeometry(14,14,3,16),dark);
+  drain.position.set(0,3,0); scene.add(drain);
+
+  // Condensation drip marks on walls (thin vertical lines)
+  for(let i=0;i<12;i++){
+    const drip=box(1,30+Math.random()*60,1,frost);
+    const side=Math.random()>0.5?1:-1;
+    drip.position.set(side*(RW/2-WT-0.5),80+Math.random()*160,-180+Math.random()*360);
+    scene.add(drip);
+  }
+}
+
+function addFood(shelfX,shelfY,side){
+  const cols=[0xcc4422,0x44aa44,0xddcc22,0x2244cc,0x884422,0xaaaaaa,0xcc8844,0x336655];
+  const frostPkg=new THREE.MeshLambertMaterial({color:0xddeeff,transparent:true,opacity:0.5});
+  for(let i=0;i<5;i++){
+    const w=18+Math.random()*18,h=18+Math.random()*28,d=16+Math.random()*14;
+    const pkg=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),
+      new THREE.MeshLambertMaterial({color:cols[Math.floor(Math.random()*cols.length)]}));
+    pkg.position.set(shelfX-side*(28-w/2-2),shelfY+h/2,-110+i*50+Math.random()*8);
+    scene.add(pkg);
+    const fp=new THREE.Mesh(new THREE.BoxGeometry(w+1,h+1,d+1),frostPkg);
+    fp.position.copy(pkg.position); scene.add(fp);
+  }
+  // Bags
+  for(let i=0;i<2;i++){
+    const bag=new THREE.Mesh(new THREE.SphereGeometry(12+Math.random()*6,8,6),
+      new THREE.MeshLambertMaterial({color:0x88aacc,transparent:true,opacity:0.75}));
+    bag.scale.set(1,0.65,1.1);
+    bag.position.set(shelfX-side*20,shelfY+10,-50+i*60);
+    scene.add(bag);
+  }
+}
+
+function checkExitDoor(){
+  if(exitTriggered)return;
+  nearExit=Math.abs(camera.position.x)<80&&camera.position.z>RD/2-100;
+  const hint=document.getElementById('doorHint');
+  if(hint)hint.style.display=nearExit?'block':'none';
+}
+
+function onKeyDown(e){
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if(e.code==='KeyE'&&nearExit&&!exitTriggered){
+    exitTriggered=true;
+    document.getElementById('doorHint').style.display='none';
+    document.getElementById('exitFade').classList.add('show');
+    if(window.SoundSystem)SoundSystem.play('doorOpen');
+    setTimeout(()=>window.location.href='pantry.html?from=freezer',600);
+    return;
+  }
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=true;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=true;
+  if(e.code==='ArrowLeft')turnLeft=true;
+  if(e.code==='ArrowRight')turnRight=true;
+}
+function onKeyUp(e){
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=false;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=false;
+  if(e.code==='ArrowLeft')turnLeft=false;
+  if(e.code==='ArrowRight')turnRight=false;
+}
+function updateRotation(){camera.rotation.order='YXZ';camera.rotation.set(0,yaw,0);}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();
+  const dt=Math.min((now-prevTime)/1000,0.05);
+  prevTime=now;
+  if(turnLeft)yaw+=TURN*dt;
+  if(turnRight)yaw-=TURN*dt;
+  updateRotation();
+  if(moveForward||moveBackward){
+    if(window.SoundSystem)SoundSystem.footstep();
+    const dir=moveForward?1:-1;
+    const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+    fwd.y=0;fwd.normalize();
+    camera.position.x+=fwd.x*dir*SPEED*dt;
+    camera.position.z+=fwd.z*dir*SPEED*dt;
+  }
+  camera.position.x=Math.max(-RW/2+30,Math.min(RW/2-30,camera.position.x));
+  camera.position.z=Math.max(-RD/2+30,Math.min(RD/2+10,camera.position.z));
+  camera.position.y=PLAYER_Y;
+  checkExitDoor();
+  renderer.render(scene,camera);
+  if(window.EvidenceSystem)EvidenceSystem.update();
+}
+
+init();
+</script>
+<script src="sound-system.js"></script>
+<script src="mystery-engine.js"></script>
+<script src="mystery-state.js"></script>
+<script src="mystery-ui.js"></script>
+<script src="evidence-system.js"></script>
+<script>
+(async()=>{
+  await MysteryEngine.init();
+  let scenario=await MysteryState.load();
+  const isNew=!scenario;
+  if(isNew){scenario=MysteryEngine.generate();await MysteryState.save(scenario);}
+  window._scenario=scenario;
+  MysteryUI.init(scenario,isNew);
+  MysteryUI.setZone('freezer');
+  EvidenceSystem.init({camera,scene,renderer,zoneId:'freezer'});
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Grand Ballroom</title>
+<style>
+#exitFade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;z-index:9999;transition:opacity 0.6s ease;}
+#exitFade.show{opacity:1;}
+#instructionLine{position:absolute;top:10px;left:50%;transform:translateX(-50%);padding:8px 16px;font-size:14px;color:#eee;background:rgba(0,0,0,0.6);border-radius:6px;z-index:30;pointer-events:none;white-space:nowrap;}
+body{margin:0;overflow:hidden;background:#000;font-family:Arial,sans-serif;}
+#info{position:absolute;top:15px;left:15px;color:#ddd;font-size:14px;background:rgba(0,0,0,0.7);padding:10px;border-radius:6px;z-index:10;}
+canvas{display:block;}
+#fadeOverlay{position:fixed;inset:0;background:#000;z-index:9999;animation:fadeOut 0.8s ease forwards;}
+@keyframes fadeOut{from{opacity:1;}to{opacity:0;}}
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit</div>
+<div id="doorHint" style="position:fixed;bottom:40px;left:50%;transform:translateX(-50%);padding:10px 24px;background:rgba(0,0,0,0.85);color:#e8c87a;border-radius:8px;font-size:17px;display:none;z-index:50;font-family:Georgia,serif;border:1px solid rgba(200,160,60,0.4);">Press E — Return to Floor 1</div>
+
+<div id="fadeOverlay"></div>
+<div id="info">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+let scene,camera,renderer;
+let moveForward=false,moveBackward=false,turnLeft=false,turnRight=false;
+let yaw=0,prevTime=performance.now();
+const S=0.5;
+const RW=1200*S, RD=1000*S, RH=500*S;
+
+function init(){
+  setTimeout(()=>{const f=document.getElementById('fadeOverlay');if(f)f.remove();},800);
+  scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x060402);
+  scene.fog=new THREE.Fog(0x060402,300,1200);
+  camera=new THREE.PerspectiveCamera(72,window.innerWidth/window.innerHeight,0.1,2000);
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth,window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Lighting — grand chandelier warm + coloured accents
+  scene.add(new THREE.AmbientLight(0x1a0e06,1.0));
+  // Main chandelier fills
+  const c1=new THREE.PointLight(0xfff5cc,2.0,800); c1.position.set(0,RH-30*S,0); scene.add(c1);
+  const c2=new THREE.PointLight(0xfff5cc,1.2,600); c2.position.set(-200*S,RH-40*S,-100*S); scene.add(c2);
+  const c3=new THREE.PointLight(0xfff5cc,1.2,600); c3.position.set( 200*S,RH-40*S,-100*S); scene.add(c3);
+  // Bar warm glow
+  const barGlow=new THREE.PointLight(0xffaa44,1.5,300); barGlow.position.set(0,120*S,-RD/2+80*S); scene.add(barGlow);
+  // Sconce accents
+  [-400*S,0,400*S].forEach(px=>{
+    const sc=new THREE.PointLight(0xffcc88,0.6,200); sc.position.set(px,200*S,-RD/2+20*S); scene.add(sc);
+    const sc2=new THREE.PointLight(0xffcc88,0.6,200); sc2.position.set(px,200*S, RD/2-20*S); scene.add(sc2);
+  });
+
+  buildRoom();
+
+  // ── Evidence system initialised after scene is built ──
+  // EvidenceSystem.init() is called in the mystery script block below init()
+
+  document.addEventListener('keydown',onKeyDown);
+  document.addEventListener('keyup',onKeyUp);
+  window.addEventListener('resize',onResize);
+
+  const from=new URLSearchParams(window.location.search).get('from');
+  camera.position.set(0,240*S,RD/2-300*S);
+  yaw=0; updateRotation(); animate();
+}
+
+function buildRoom(){
+  // Materials
+  const wallMat  =new THREE.MeshLambertMaterial({color:0x3a2c1e});
+  const floorMat =new THREE.MeshLambertMaterial({color:0x1a1208});
+  const ceilMat  =new THREE.MeshLambertMaterial({color:0x2a2018});
+  const darkWood =new THREE.MeshLambertMaterial({color:0x1a0c04});
+  const midWood  =new THREE.MeshLambertMaterial({color:0x3a1c08});
+  const richWood =new THREE.MeshLambertMaterial({color:0x5c2e0e});
+  const brassMat =new THREE.MeshLambertMaterial({color:0xb8860b});
+  const goldMat  =new THREE.MeshLambertMaterial({color:0xd4a820});
+  const marbleMat=new THREE.MeshLambertMaterial({color:0xe8e0d0});
+  const whiteMat =new THREE.MeshLambertMaterial({color:0xf0ece4});
+  const mirrorMat=new THREE.MeshLambertMaterial({color:0x8899aa,emissive:0x112233});
+  const redVelvet=new THREE.MeshLambertMaterial({color:0x5a0808});
+  const darkMat  =new THREE.MeshLambertMaterial({color:0x060402});
+  const glassMat =new THREE.MeshLambertMaterial({color:0x88bbcc,transparent:true,opacity:0.25,side:THREE.DoubleSide});
+  const bottleGrn=new THREE.MeshLambertMaterial({color:0x1a4a20,transparent:true,opacity:0.85});
+  const bottleAmb=new THREE.MeshLambertMaterial({color:0x8b5a00,transparent:true,opacity:0.85});
+  const bottleClr=new THREE.MeshLambertMaterial({color:0xaaccdd,transparent:true,opacity:0.6});
+  const wainMat  =new THREE.MeshLambertMaterial({color:0x2a1a0c});
+  const pillarMat=new THREE.MeshLambertMaterial({color:0xd4c8b4});
+  const wH=130*S;
+
+  // ── Parquet floor ──
+  const tileA=new THREE.MeshLambertMaterial({color:0x2a1e10});
+  const tileB=new THREE.MeshLambertMaterial({color:0x1e1408});
+  const tSz=40*S;
+  for(let ix=0;ix<Math.ceil(RW/tSz);ix++)
+    for(let iz=0;iz<Math.ceil(RD/tSz);iz++){
+      const m=(ix+iz)%2===0?tileA:tileB;
+      const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-0.5*S,1.5*S,tSz-0.5*S),m);
+      t.position.set(-RW/2+tSz*(ix+0.5),0.75*S,-RD/2+tSz*(iz+0.5)); scene.add(t);
+    }
+
+  // ── Ceiling ──
+  const ceil=new THREE.Mesh(new THREE.PlaneGeometry(RW,RD),ceilMat);
+  ceil.rotation.x=Math.PI/2; ceil.position.y=RH; scene.add(ceil);
+  // Ceiling coffers
+  for(let ix=0;ix<4;ix++)for(let iz=0;iz<3;iz++){
+    const coffer=new THREE.Mesh(new THREE.BoxGeometry(240*S,8*S,240*S),
+      new THREE.MeshLambertMaterial({color:0x241a0e}));
+    coffer.position.set(-360*S+ix*240*S,RH-4*S,-240*S+iz*240*S); scene.add(coffer);
+  }
+  // Ceiling rose centre
+  const rose=new THREE.Mesh(new THREE.CylinderGeometry(50*S,50*S,6*S,24),whiteMat);
+  rose.position.set(0,RH-3*S,0); scene.add(rose);
+  const rose2=new THREE.Mesh(new THREE.CylinderGeometry(34*S,34*S,8*S,24),whiteMat);
+  rose2.position.set(0,RH-4*S,0); scene.add(rose2);
+
+  // ── Grand chandelier ──
+  const chanChain=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,80*S,8),brassMat);
+  chanChain.position.set(0,RH-42*S,0); scene.add(chanChain);
+  const chanBase=new THREE.Mesh(new THREE.CylinderGeometry(10*S,10*S,16*S,12),goldMat);
+  chanBase.position.set(0,RH-86*S,0); scene.add(chanBase);
+  // Three rings
+  [60*S,40*S,20*S].forEach((r,ri)=>{
+    const ring=new THREE.Mesh(new THREE.TorusGeometry(r,2.5*S,8,24),goldMat);
+    ring.rotation.x=Math.PI/2; ring.position.set(0,RH-90*S-ri*20*S,0); scene.add(ring);
+    const arms=ri===0?12:ri===1?8:6;
+    for(let i=0;i<arms;i++){
+      const a=i*Math.PI*2/arms;
+      const arm=new THREE.Mesh(new THREE.CylinderGeometry(1*S,1*S,r,6),brassMat);
+      arm.rotation.z=Math.PI/2; arm.position.set(Math.cos(a)*r/2,RH-90*S-ri*20*S,Math.sin(a)*r/2); scene.add(arm);
+      const globe=new THREE.Mesh(new THREE.SphereGeometry(5*S,8,8),
+        new THREE.MeshLambertMaterial({color:0xfffae0,emissive:0x664400}));
+      globe.position.set(Math.cos(a)*r,RH-92*S-ri*20*S,Math.sin(a)*r); scene.add(globe);
+    }
+  });
+  // Crystal drops
+  for(let i=0;i<20;i++){
+    const a=i*Math.PI/10; const r=50*S+Math.random()*10*S;
+    const drop=new THREE.Mesh(new THREE.CylinderGeometry(1*S,0.5*S,8*S,6),
+      new THREE.MeshLambertMaterial({color:0xddeeff,transparent:true,opacity:0.7}));
+    drop.position.set(Math.cos(a)*r,RH-108*S,Math.sin(a)*r); scene.add(drop);
+  }
+
+  // ── Walls ──
+  const backWall=new THREE.Mesh(new THREE.BoxGeometry(RW,RH,16*S),wallMat);
+  backWall.position.set(0,RH/2,-RD/2+8*S); scene.add(backWall);
+  const leftWall=new THREE.Mesh(new THREE.BoxGeometry(16*S,RH,RD),wallMat);
+  leftWall.position.set(-RW/2+8*S,RH/2,0); scene.add(leftWall);
+  const rightWall=leftWall.clone(); rightWall.position.x=RW/2-8*S; scene.add(rightWall);
+  const doorGapW=400*S, doorGapH=RH;
+  const fSideW=(RW-doorGapW)/2;
+  const fL=new THREE.Mesh(new THREE.BoxGeometry(fSideW,RH,16*S),wallMat);
+  fL.position.set(-(doorGapW/2+fSideW/2),RH/2,RD/2-8*S); scene.add(fL);
+  const fR=fL.clone(); fR.position.x=doorGapW/2+fSideW/2; scene.add(fR);
+  // No transom — door gap goes to ceiling
+
+  // ── Wainscot ──
+  [[new THREE.BoxGeometry(RW,wH,18*S),0,wH/2,-RD/2+9*S],
+   [new THREE.BoxGeometry(18*S,wH,RD),-RW/2+9*S,wH/2,0],
+   [new THREE.BoxGeometry(18*S,wH,RD), RW/2-9*S,wH/2,0],
+  ].forEach(([geo,x,y,z])=>{const m=new THREE.Mesh(geo,wainMat);m.position.set(x,y,z);scene.add(m);});
+  [-1,1].forEach(s=>{
+    const fw=new THREE.Mesh(new THREE.BoxGeometry(fSideW,wH,18*S),wainMat);
+    fw.position.set(s*(doorGapW/2+fSideW/2),wH/2,RD/2-9*S); scene.add(fw);
+  });
+  // Dado rail
+  [[new THREE.BoxGeometry(RW+16*S,10*S,24*S),0,wH+5*S,-RD/2+12*S],
+   [new THREE.BoxGeometry(24*S,10*S,RD+16*S),-RW/2+12*S,wH+5*S,0],
+   [new THREE.BoxGeometry(24*S,10*S,RD+16*S), RW/2-12*S,wH+5*S,0],
+  ].forEach(([geo,x,y,z])=>{const m=new THREE.Mesh(geo,richWood);m.position.set(x,y,z);scene.add(m);});
+
+  // ── Arched mirrors — back wall ──
+  [-300*S,0,300*S].forEach(px=>{
+    const mFrame=new THREE.Mesh(new THREE.BoxGeometry(120*S,200*S,10*S),goldMat);
+    mFrame.position.set(px,wH+120*S,-RD/2+10*S); scene.add(mFrame);
+    const mGlass=new THREE.Mesh(new THREE.PlaneGeometry(104*S,184*S),mirrorMat);
+    mGlass.position.set(px,wH+120*S,-RD/2+15*S); scene.add(mGlass);
+    // Arch top
+    const archTop=new THREE.Mesh(new THREE.CylinderGeometry(52*S,52*S,10*S,20,1,false,0,Math.PI),goldMat);
+    archTop.rotation.z=Math.PI/2; archTop.rotation.y=Math.PI/2;
+    archTop.position.set(px,wH+220*S,-RD/2+10*S); scene.add(archTop);
+  });
+
+  // ── Wall sconces ──
+  [-450*S,-150*S,150*S,450*S].forEach(px=>{
+    [-1,1].forEach(side=>{
+      const plate=new THREE.Mesh(new THREE.BoxGeometry(12*S,40*S,8*S),brassMat);
+      plate.position.set(px,220*S,side*(RD/2-12*S)); scene.add(plate);
+      const arm=new THREE.Mesh(new THREE.BoxGeometry(3*S,3*S,24*S),brassMat);
+      arm.position.set(px,224*S,side*(RD/2-24*S)); scene.add(arm);
+      const globe=new THREE.Mesh(new THREE.SphereGeometry(8*S,10,8),
+        new THREE.MeshLambertMaterial({color:0xfffacc,emissive:0x665500}));
+      globe.position.set(px,224*S,side*(RD/2-36*S)); scene.add(globe);
+    });
+  });
+
+  // ── Grand double doors (floor-to-ceiling) ──
+  const dFW=360*S,dFH=RH,dPW=320*S,dPH=RH-6*S,JAMB=28*S;
+  const frameMat2=new THREE.MeshLambertMaterial({color:0x050301});
+  const jL=new THREE.Mesh(new THREE.BoxGeometry(14*S,dFH,JAMB),goldMat);
+  jL.position.set(-dFW/2-JAMB/2,dFH/2,RD/2-10*S); scene.add(jL);
+  const jR=jL.clone(); jR.position.x=dFW/2+JAMB/2; scene.add(jR);
+  // No header — doors go to ceiling
+  [-1,1].forEach(s=>{
+    const door=new THREE.Mesh(new THREE.BoxGeometry(dPW/2,dPH,8*S),darkWood);
+    door.position.set(s*dPW/4,dPH/2,RD/2-6*S); scene.add(door);
+    [dPH*0.08,dPH*0.25,dPH*0.44,dPH*0.62,dPH*0.78,dPH*0.91].forEach(py=>{
+      const pnl=new THREE.Mesh(new THREE.BoxGeometry(dPW/2-22*S,dPH*0.11,4*S),midWood);
+      pnl.position.set(s*dPW/4,py,RD/2-2*S); scene.add(pnl);
+    });
+    [dPH*0.16,dPH*0.34,dPH*0.52,dPH*0.70,dPH*0.84].forEach(by=>{
+      const band=new THREE.Mesh(new THREE.BoxGeometry(dPW/2,5*S,5*S),goldMat);
+      band.position.set(s*dPW/4,by,RD/2-3*S); scene.add(band);
+    });
+    const hdl=new THREE.Mesh(new THREE.SphereGeometry(5*S,10,10),brassMat);
+    hdl.position.set(s*(dPW/4-20*S),dPH*0.4,RD/2); scene.add(hdl);
+  });
+  const divStrip=new THREE.Mesh(new THREE.BoxGeometry(5*S,dPH,10*S),goldMat);
+  divStrip.position.set(0,dPH/2,RD/2-5*S); scene.add(divStrip);
+
+  // ── Bar — back wall centre ──
+  (function(){
+    const bx=0, bz=-RD/2+180*S;
+    const barW=500*S, barD=60*S, barH=100*S;
+
+    // Bar counter
+    const counter=new THREE.Mesh(new THREE.BoxGeometry(barW,barH,barD),darkWood);
+    counter.position.set(bx,barH/2,bz); scene.add(counter);
+    // Marble top
+    const top=new THREE.Mesh(new THREE.BoxGeometry(barW+8*S,10*S,barD+10*S),marbleMat);
+    top.position.set(bx,barH+5*S,bz); scene.add(top);
+    // Front face panels
+    [-180*S,-60*S,60*S,180*S].forEach(px=>{
+      const pnl=new THREE.Mesh(new THREE.BoxGeometry(100*S,barH-20*S,barD-4*S),midWood);
+      pnl.position.set(bx+px,barH/2,bz+1*S); scene.add(pnl);
+      const mld=new THREE.Mesh(new THREE.BoxGeometry(104*S,barH-16*S,barD-3*S),richWood);
+      mld.position.set(bx+px,barH/2,bz+0.5*S); scene.add(mld);
+    });
+    // Brass footrail
+    const rail=new THREE.Mesh(new THREE.CylinderGeometry(2.5*S,2.5*S,barW,8),brassMat);
+    rail.rotation.z=Math.PI/2; rail.position.set(bx,20*S,bz+barD/2+2*S); scene.add(rail);
+    [-barW/2+10*S,-barW/4,0,barW/4,barW/2-10*S].forEach(px=>{
+      const post=new THREE.Mesh(new THREE.CylinderGeometry(2*S,2*S,20*S,8),brassMat);
+      post.position.set(bx+px,10*S,bz+barD/2+2*S); scene.add(post);
+    });
+
+    // Back bar shelving
+    const backShelf=new THREE.Mesh(new THREE.BoxGeometry(barW,RH-barH-10*S,20*S),darkWood);
+    backShelf.position.set(bx,(RH-barH-10*S)/2+barH,-RD/2+10*S); scene.add(backShelf);
+    [barH+60*S,barH+130*S,barH+200*S].forEach(y=>{
+      const shelf=new THREE.Mesh(new THREE.BoxGeometry(barW-4*S,8*S,18*S),richWood);
+      shelf.position.set(bx,y,-RD/2+10*S); scene.add(shelf);
+    });
+
+    // Large mirror behind bar
+    const mFrame=new THREE.Mesh(new THREE.BoxGeometry(barW-20*S,160*S,10*S),goldMat);
+    mFrame.position.set(bx,barH+120*S,-RD/2+11*S); scene.add(mFrame);
+    const mGlass=new THREE.Mesh(new THREE.PlaneGeometry(barW-36*S,144*S),mirrorMat);
+    mGlass.position.set(bx,barH+120*S,-RD/2+16*S); scene.add(mGlass);
+
+    // Bottles on shelves
+    const bottleMats=[bottleGrn,bottleAmb,bottleClr,bottleGrn,bottleAmb,bottleClr,bottleGrn,bottleAmb];
+    [barH+60*S,barH+130*S,barH+200*S].forEach(y=>{
+      for(let bi=0;bi<14;bi++){
+        const bMat=bottleMats[bi%8];
+        const bottle=new THREE.Mesh(new THREE.CylinderGeometry(4*S,4*S,26*S,8),bMat);
+        bottle.position.set(bx-barW/2+20*S+bi*33*S,y+16*S,-RD/2+11*S); scene.add(bottle);
+        const neck=new THREE.Mesh(new THREE.CylinderGeometry(2*S,4*S,8*S,8),bMat);
+        neck.position.set(bx-barW/2+20*S+bi*33*S,y+33*S,-RD/2+11*S); scene.add(neck);
+        const cap=new THREE.Mesh(new THREE.CylinderGeometry(2.5*S,2.5*S,4*S,8),brassMat);
+        cap.position.set(bx-barW/2+20*S+bi*33*S,y+39*S,-RD/2+11*S); scene.add(cap);
+      }
+    });
+
+    // Bar stools
+    [-200*S,-100*S,0,100*S,200*S].forEach(px=>{
+      const seat=new THREE.Mesh(new THREE.CylinderGeometry(16*S,16*S,6*S,16),redVelvet);
+      seat.position.set(bx+px,(barH+14*S)/2+3*S,bz+barD/2+30*S); scene.add(seat);
+      const stem=new THREE.Mesh(new THREE.CylinderGeometry(3*S,4*S,(barH+14*S)/2,8),brassMat);
+      stem.position.set(bx+px,(barH+14*S)/4,bz+barD/2+30*S); scene.add(stem);
+      const base2=new THREE.Mesh(new THREE.CylinderGeometry(14*S,14*S,4*S,16),brassMat);
+      base2.position.set(bx+px,2*S,bz+barD/2+30*S); scene.add(base2);
+    });
+
+    // Glasses on bar top
+    [-80*S,-40*S,0,40*S,80*S].forEach(px=>{
+      const glass=new THREE.Mesh(new THREE.CylinderGeometry(5*S,3*S,12*S,10),glassMat);
+      glass.position.set(bx+px,barH+12*S,bz-5*S); scene.add(glass);
+    });
+
+    // Bar pendant lights
+    [-160*S,-40*S,80*S,200*S].forEach(px=>{
+      const wire=new THREE.Mesh(new THREE.CylinderGeometry(0.8*S,0.8*S,60*S,6),darkMat);
+      wire.position.set(bx+px,RH-32*S,bz); scene.add(wire);
+      const shade=new THREE.Mesh(new THREE.CylinderGeometry(14*S,8*S,16*S,16,1,true),
+        new THREE.MeshLambertMaterial({color:0x2a1408,side:THREE.DoubleSide}));
+      shade.position.set(bx+px,RH-68*S,bz); scene.add(shade);
+      const bulb=new THREE.Mesh(new THREE.SphereGeometry(5*S,8,8),
+        new THREE.MeshLambertMaterial({color:0xfffacc,emissive:0x775500}));
+      bulb.position.set(bx+px,RH-65*S,bz); scene.add(bulb);
+    });
+  })();
+
+  // ── Dining tables + chairs all around dance floor ──
+  (function(){
+    const tableclothMat=new THREE.MeshLambertMaterial({color:0xffffff});
+    const drapeMat=new THREE.MeshLambertMaterial({color:0xf8f4f0,side:THREE.DoubleSide,transparent:true,opacity:0.95});
+    function makeTable(tx,tz){
+      // Table
+      const top=new THREE.Mesh(new THREE.CylinderGeometry(42*S,42*S,8*S,20),tableclothMat);
+      top.position.set(tx,80*S,tz); scene.add(top);
+      const drape=new THREE.Mesh(new THREE.CylinderGeometry(46*S,40*S,20*S,20,1,true),drapeMat);
+      drape.position.set(tx,72*S,tz); scene.add(drape);
+      const stem=new THREE.Mesh(new THREE.CylinderGeometry(5*S,8*S,70*S,10),darkWood);
+      stem.position.set(tx,37*S,tz); scene.add(stem);
+      const tbase=new THREE.Mesh(new THREE.CylinderGeometry(18*S,18*S,5*S,16),darkWood);
+      tbase.position.set(tx,2.5*S,tz); scene.add(tbase);
+      // Candle
+      const cand=new THREE.Mesh(new THREE.CylinderGeometry(3*S,3*S,18*S,8),
+        new THREE.MeshLambertMaterial({color:0xfffae0}));
+      cand.position.set(tx,97*S,tz); scene.add(cand);
+      const flame=new THREE.Mesh(new THREE.SphereGeometry(3*S,6,6),
+        new THREE.MeshLambertMaterial({color:0xff8800,emissive:0x884400}));
+      flame.position.set(tx,108*S,tz); scene.add(flame);
+      // Glasses
+      for(let gi=0;gi<6;gi++){
+        const ga=gi*Math.PI/3;
+        const glass=new THREE.Mesh(new THREE.CylinderGeometry(3.5*S,2*S,9*S,10),glassMat);
+        glass.position.set(tx+Math.cos(ga)*28*S,86*S,tz+Math.sin(ga)*28*S); scene.add(glass);
+      }
+      // 6 chairs around each table
+      for(let ci=0;ci<6;ci++){
+        const ca=ci*Math.PI/3;
+        const cr=60*S;
+        const cx=tx+Math.cos(ca)*cr, cz=tz+Math.sin(ca)*cr;
+        const seat=new THREE.Mesh(new THREE.BoxGeometry(30*S,4*S,28*S),redVelvet);
+        seat.position.set(cx,52*S,cz); seat.rotation.y=ca; scene.add(seat);
+        const back=new THREE.Mesh(new THREE.BoxGeometry(30*S,38*S,4*S),darkWood);
+        back.position.set(cx,72*S,cz); back.rotation.y=ca; scene.add(back);
+        const backTop=new THREE.Mesh(new THREE.BoxGeometry(30*S,5*S,4*S),richWood);
+        backTop.position.set(cx,93*S,cz); backTop.rotation.y=ca; scene.add(backTop);
+        [[-9*S,11*S],[9*S,11*S],[-9*S,-11*S],[9*S,-11*S]].forEach(([ox,oz])=>{
+          const leg=new THREE.Mesh(new THREE.CylinderGeometry(1.5*S,1.5*S,50*S,6),darkWood);
+          const lx=cx+Math.cos(ca)*oz-Math.sin(ca)*ox;
+          const lz=cz+Math.sin(ca)*oz+Math.cos(ca)*ox;
+          leg.position.set(lx,27*S,lz); scene.add(leg);
+        });
+      }
+    }
+    // Left wall tables
+    [-360*S,-120*S,120*S,360*S].forEach(tz=>makeTable(-RW/2+110*S,tz));
+    // Right wall tables
+    [-360*S,-120*S,120*S,360*S].forEach(tz=>makeTable( RW/2-110*S,tz));
+    // Back wall tables (sides of bar)
+    [-420*S,420*S].forEach(px=>makeTable(px,-RD/2+110*S));
+    // Front wall — no tables (entrance door area kept clear)
+  })();
+}
+
+function onResize(){camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();renderer.setSize(window.innerWidth,window.innerHeight);}
+function updateRotation(){camera.rotation.order='YXZ';camera.rotation.set(0,yaw,0);}
+function onKeyDown(e){
+  if(e.code==='KeyE'&&nearExit&&!exitTriggered){
+    exitTriggered=true;
+    if(window.SoundSystem)SoundSystem.play('doorOpen');
+    document.getElementById('doorHint').style.display='none';
+    document.getElementById('exitFade').classList.add('show');
+    setTimeout(()=>window.location.href='floor1.html?from=ballroom&syaw=-96',600);
+    return;
+  }
+  if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=true;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=true;
+  if(e.code==='ArrowLeft')turnLeft=true;
+  if(e.code==='ArrowRight')turnRight=true;
+}
+function onKeyUp(e){
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=false;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=false;
+  if(e.code==='ArrowLeft')turnLeft=false;
+  if(e.code==='ArrowRight')turnRight=false;
+}
+
+const exitCooldown=(new URLSearchParams(window.location.search).get('from')==='floor1')?Date.now()+4000:0;
+let exitTriggered=false;
+let nearExit=false;
+function checkExitDoor(){
+  if(exitTriggered)return; if(Date.now()<exitCooldown)return;
+  nearExit=camera.position.x>-210*S&&camera.position.x<210*S&&camera.position.z>RD/2-180*S;
+  const hint=document.getElementById('doorHint');
+  if(hint)hint.style.display=nearExit?'block':'none';
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();
+  const delta=(now-prevTime)/1000; prevTime=now;
+  if(turnLeft)yaw+=2.2*delta; if(turnRight)yaw-=2.2*delta;
+  const mv=Number(moveForward)-Number(moveBackward);
+  const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  camera.position.x+=fwd.x*mv*110*delta;
+  camera.position.z+=fwd.z*mv*110*delta;
+  camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2-20*S,camera.position.x));
+  camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-15*S,camera.position.z));
+  camera.position.y=240*S;
+  if(mv!==0&&window.SoundSystem)SoundSystem.footstep();
+  checkExitDoor(); updateRotation(); renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+// engine scripts loaded below
+</script>
+<script src="sound-system.js"></script>
+<script src="mystery-engine.js"></script>
+<script src="mystery-state.js"></script>
+<script src="mystery-ui.js"></script>
+<script src="evidence-system.js"></script>
+<script>
+(async () => {
+  await MysteryEngine.init();
+  let scenario = await MysteryState.load();
+  const isNew = !scenario;
+  console.log('%c[Mystery] isNew=' + isNew + ' scenario=' + (scenario ? 'loaded' : 'null'), 'color:cyan;font-weight:bold');
+  if (isNew) { scenario = MysteryEngine.generate(); await MysteryState.save(scenario); }
+  window._scenario = scenario;
+  MysteryUI.init(scenario, isNew);
+  MysteryUI.setZone('ballroom');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'ballroom' });
+  const startAmb=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',startAmb);window.removeEventListener('click',startAmb);};
+  window.addEventListener('keydown',startAmb);
+  window.addEventListener('click',startAmb);
+})();
+</script>
+</body>
+</html>

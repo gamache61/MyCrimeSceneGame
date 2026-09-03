@@ -1,0 +1,1801 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>The Library</title>
+<style>
+#exitFade { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; z-index: 9999; transition: opacity 0.6s ease; }
+#exitFade.show { opacity: 1; }
+#instructionLine {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+  padding: 8px 18px; font-size: 14px; color: #e8d5b0;
+  background: rgba(0,0,0,0.72); border-radius: 8px; z-index: 30;
+  pointer-events: none; white-space: nowrap;
+  font-family: 'Georgia', serif; letter-spacing: 0.5px;
+}
+#doorHint {
+  position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%);
+  padding: 10px 24px; background: rgba(0,0,0,0.85); color: #e8c87a;
+  border-radius: 8px; font-size: 17px; display: none; z-index: 50;
+  font-family: Georgia, serif; border: 1px solid rgba(200,160,60,0.4);
+}
+body { margin: 0; overflow: hidden; background: #000; }
+#selInfo{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:8px 18px;background:rgba(0,0,0,0.8);color:#aaddff;border-radius:8px;font-size:13px;display:none;z-index:60;pointer-events:none;}
+#editStatus{position:fixed;bottom:120px;left:50%;transform:translateX(-50%);padding:6px 16px;background:rgba(20,60,20,0.9);color:#90e090;border-radius:8px;font-size:12px;display:none;z-index:60;pointer-events:none;}
+#editToggle{position:fixed;top:14px;left:14px;background:rgba(10,8,4,0.88);border:1px solid rgba(200,170,80,0.4);border-radius:8px;padding:7px 14px;color:#7a6a40;font:700 12px system-ui;cursor:pointer;z-index:300;user-select:none;}
+#editToggle.on{color:#d4b96a;border-color:rgba(80,255,120,0.5);background:rgba(20,40,20,0.9);}
+
+#fadeOverlay {
+  position: fixed; inset: 0; background: #000; z-index: 9998;
+  animation: fadeOut 0.9s ease forwards;
+}
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; pointer-events: none; } }
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<button id="editToggle" onclick="toggleEditMode()">M = Edit Mode</button>
+<div id="selInfo"></div>
+<div id="editStatus"></div>
+<div id="doorHint">Press E — Return to Floor 1</div>
+<div id="instructionLine">↑↓ Move &nbsp;·&nbsp; ←→ Turn &nbsp;·&nbsp; E = Interact/Exit &nbsp;·&nbsp; M = Edit</div>
+<div id="fadeOverlay"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+let scene, camera, renderer;
+let moveForward = false, moveBackward = false, turnLeft = false, turnRight = false;
+let yaw = 0; // face into room on entry
+let prevTime = performance.now();
+
+// Room dimensions
+const RW = 900;   // room width  (X)
+const RD = 1100;  // room depth  (Z)
+const RH = 480;   // room height (Y)
+const WT = 28;    // wall thickness
+const PLAYER_Y = 260;
+const SPEED = 280;
+const TURN = 1.8;
+
+function init() {
+  setTimeout(() => { const f = document.getElementById('fadeOverlay'); if (f) { f.style.opacity='0'; setTimeout(()=>f.remove(),900); } }, 50);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0d0906);
+  scene.fog = new THREE.Fog(0x0d0906, 400, 1400);
+
+  camera = new THREE.PerspectiveCamera(72, innerWidth / innerHeight, 1, 3000);
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.body.appendChild(renderer.domElement);
+
+  buildLights();
+  buildRoom();
+  buildBookshelves();
+  buildReadingTables();
+  buildDoorway();
+  buildGallery();
+  buildEvidenceBoard();
+
+  // Spawn just inside the doorway
+  camera.position.set(0, PLAYER_Y, RD / 2 - 200);
+  yaw = 0;
+  updateRotation();
+
+  document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('keyup', onKeyUp);
+  window.addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  animate();
+}
+
+// ─── MATERIALS ────────────────────────────────────────────────
+const MAT = {
+  floor:    new THREE.MeshLambertMaterial({ color: 0x2a1f14 }),
+  ceiling:  new THREE.MeshLambertMaterial({ color: 0x1e160e }),
+  wall:     new THREE.MeshLambertMaterial({ color: 0x3a2a1a }),
+  wallDark: new THREE.MeshLambertMaterial({ color: 0x251a0f }),
+  wood:     new THREE.MeshLambertMaterial({ color: 0x3d2410 }),
+  woodDark: new THREE.MeshLambertMaterial({ color: 0x1e0f05 }),
+  woodMid:  new THREE.MeshLambertMaterial({ color: 0x4a2e14 }),
+  trim:     new THREE.MeshLambertMaterial({ color: 0x0f0803 }),
+  metal:    new THREE.MeshLambertMaterial({ color: 0x8a7a60 }),
+  carpet:   new THREE.MeshLambertMaterial({ color: 0x4a1a0a }),
+};
+
+// Book spine colors
+const BOOK_COLORS = [
+  0x8b1a1a, 0x1a3a8b, 0x1a6b1a, 0x6b4a1a, 0x4a1a6b,
+  0x8b5a1a, 0x1a5a6b, 0x6b1a4a, 0x2a5a2a, 0x6b2a1a,
+  0x1a2a6b, 0x5a3a1a, 0x8b8b1a, 0x1a6b6b, 0x4a4a1a,
+  0x6b1a1a, 0x1a4a4a, 0x4a1a1a, 0x2a4a2a, 0x1a1a4a,
+];
+
+function rnd(a, b) { return a + Math.random() * (b - a); }
+function box(w, h, d, mat) { return new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat); }
+
+// ─── LIGHTS ──────────────────────────────────────────────────
+function buildLights() {
+  scene.add(new THREE.AmbientLight(0xc8a870, 0.6));
+
+  // Main chandelier-style point lights
+  const chandelier = new THREE.PointLight(0xffcc77, 1.8, 1400);
+  chandelier.position.set(0, RH - 40, 0);
+  chandelier.castShadow = true;
+  scene.add(chandelier);
+
+  // Side sconces warmth
+  const sconce1 = new THREE.PointLight(0xff9944, 1.0, 700);
+  sconce1.position.set(-RW/2 + 60, RH * 0.6, 0);
+  scene.add(sconce1);
+  const sconce2 = new THREE.PointLight(0xff9944, 1.0, 700);
+  sconce2.position.set(RW/2 - 60, RH * 0.6, 0);
+  scene.add(sconce2);
+
+  // Back wall accent
+  const backLight = new THREE.PointLight(0xdd8833, 0.9, 650);
+  backLight.position.set(0, RH * 0.55, -RD/2 + 80);
+  scene.add(backLight);
+
+  // Fireplace glow (back-left corner area)
+  const fire = new THREE.PointLight(0xff5500, 1.2, 550);
+  fire.position.set(-RW/2 + 120, 80, -RD/2 + 140);
+  scene.add(fire);
+}
+
+// ─── ROOM SHELL ─────────────────────────────────────────────
+function buildRoom() {
+  // Floor
+  const floor = box(RW, 10, RD, MAT.floor);
+  floor.position.set(0, -5, 0);
+  scene.add(floor);
+
+  // Carpet runner down centre
+  const carpet = box(240, 12, RD - 200, MAT.carpet);
+  carpet.position.set(0, 1, 0);
+  scene.add(carpet);
+
+  // Ceiling with coffers suggestion
+  const ceiling = box(RW, 10, RD, MAT.ceiling);
+  ceiling.position.set(0, RH + 5, 0);
+  scene.add(ceiling);
+
+  // Ceiling beams
+  for (let z = -RD/2 + 150; z < RD/2; z += 200) {
+    const beam = box(RW, 22, 30, MAT.woodDark);
+    beam.position.set(0, RH - 8, z);
+    scene.add(beam);
+  }
+  for (let x = -RW/2 + 150; x < RW/2; x += 200) {
+    const beam = box(30, 22, RD, MAT.woodDark);
+    beam.position.set(x, RH - 8, 0);
+    scene.add(beam);
+  }
+
+  // Back wall
+  const backWall = box(RW, RH, WT, MAT.wall);
+  backWall.position.set(0, RH/2, -RD/2);
+  scene.add(backWall);
+
+  // Left wall
+  const leftWall = box(WT, RH, RD, MAT.wall);
+  leftWall.position.set(-RW/2, RH/2, 0);
+  scene.add(leftWall);
+
+  // Right wall
+  const rightWall = box(WT, RH, RD, MAT.wall);
+  rightWall.position.set(RW/2, RH/2, 0);
+  scene.add(rightWall);
+
+  // Front wall — two side sections (doorway gap = 240 wide)
+  const doorW = 360, doorH = RH;
+  const sideW = (RW - doorW) / 2;
+  const fwL = box(sideW, RH, WT, MAT.wall);
+  fwL.position.set(-RW/2 + sideW/2, RH/2, RD/2);
+  scene.add(fwL);
+  const fwR = box(sideW, RH, WT, MAT.wall);
+  fwR.position.set(RW/2 - sideW/2, RH/2, RD/2);
+  scene.add(fwR);
+  // Above doorway — none, door reaches ceiling
+
+  // Wainscoting panels on walls
+  addWainscoting();
+}
+
+function addWainscoting() {
+  const panH = 140, panY = panH/2 + 4;
+  const panMat = MAT.woodDark;
+  const capMat = MAT.trim;
+
+  // Left wall panels
+  for (let z = -RD/2 + 80; z < RD/2 - 80; z += 160) {
+    const pan = box(14, panH, 130, panMat);
+    pan.position.set(-RW/2 + 18, panY, z);
+    scene.add(pan);
+  }
+  // Rail cap left
+  const capL = box(14, 12, RD - 80, capMat);
+  capL.position.set(-RW/2 + 18, panH + 10, 0);
+  scene.add(capL);
+
+  // Right wall panels
+  for (let z = -RD/2 + 80; z < RD/2 - 80; z += 160) {
+    const pan = box(14, panH, 130, panMat);
+    pan.position.set(RW/2 - 18, panY, z);
+    scene.add(pan);
+  }
+  const capR = box(14, 12, RD - 80, capMat);
+  capR.position.set(RW/2 - 18, panH + 10, 0);
+  scene.add(capR);
+
+  // Back wall panels
+  for (let x = -RW/2 + 80; x < RW/2 - 80; x += 160) {
+    const pan = box(130, panH, 14, panMat);
+    pan.position.set(x, panY, -RD/2 + 18);
+    scene.add(pan);
+  }
+  const capB = box(RW - 80, 12, 14, capMat);
+  capB.position.set(0, panH + 10, -RD/2 + 18);
+  scene.add(capB);
+}
+
+// ─── BOOKSHELVES ────────────────────────────────────────────
+function buildBookshelves() {
+  const shelfD = 55;   // shelf depth
+  const shelfW = 200;  // each unit width
+  const shelfH = RH - 20;
+  const numShelves = 5; // vertical shelves per unit
+  const shelfSpacing = shelfH / numShelves;
+
+  // Left wall — 3 shelf units
+  for (let i = 0; i < 3; i++) {
+    const z = -RD/2 + 200 + i * 240;
+    makeShelfUnit(-RW/2 + WT/2 + shelfD/2, 0, z, shelfW, shelfH, shelfD, numShelves, 'left');
+  }
+
+  // Right wall — 3 shelf units
+  for (let i = 0; i < 3; i++) {
+    const z = -RD/2 + 200 + i * 240;
+    makeShelfUnit(RW/2 - WT/2 - shelfD/2, 0, z, shelfW, shelfH, shelfD, numShelves, 'right');
+  }
+
+  // Back wall — 2 shelf units flanking fireplace
+  makeShelfUnit(-200, 0, -RD/2 + WT/2 + shelfD/2, 240, shelfH - 60, shelfD, numShelves, 'back');
+  makeShelfUnit( 200, 0, -RD/2 + WT/2 + shelfD/2, 240, shelfH - 60, shelfD, numShelves, 'back');
+
+  // Fireplace in back-centre
+  buildFireplace(0, 0, -RD/2 + WT/2 + 2);
+}
+
+function makeShelfUnit(x, y, z, w, h, d, numShelves, side) {
+  const g = new THREE.Group();
+
+  // Back panel
+  const back = box(w, h, 8, MAT.woodDark);
+  g.add(back);
+
+  // Side panels
+  const sideL = box(8, h, d, MAT.wood);
+  sideL.position.x = -w/2 + 4;
+  g.add(sideL);
+  const sideR = sideL.clone();
+  sideR.position.x = w/2 - 4;
+  g.add(sideR);
+
+  // Top & bottom
+  const top = box(w, 10, d, MAT.wood);
+  top.position.y = h/2 - 5;
+  g.add(top);
+  const bot = top.clone();
+  bot.position.y = -h/2 + 5;
+  g.add(bot);
+
+  // Shelves + books
+  for (let s = 0; s < numShelves; s++) {
+    const sy = -h/2 + 12 + s * (h / numShelves);
+    const shelf = box(w - 16, 8, d - 4, MAT.woodMid);
+    shelf.position.y = sy;
+    g.add(shelf);
+
+    // Fill shelf with books
+    fillShelfWithBooks(g, w - 24, sy + 4, d * 0.3, h / numShelves - 14);
+  }
+
+  g.position.set(x, h/2, z);
+
+  // Rotate based on which wall
+  if (side === 'left')  g.rotation.y = Math.PI / 2;
+  if (side === 'right') g.rotation.y = -Math.PI / 2;
+
+  scene.add(g);
+}
+
+function fillShelfWithBooks(parent, shelfW, shelfY, shelfZ, maxH) {
+  let curX = -shelfW/2 + 4;
+  while (curX < shelfW/2 - 10) {
+    const bw = rnd(10, 20);
+    const bh = Math.min(rnd(maxH * 0.55, maxH * 0.92), maxH);
+    const bd = rnd(28, 38);
+    const col = BOOK_COLORS[Math.floor(Math.random() * BOOK_COLORS.length)];
+    const bmat = new THREE.MeshLambertMaterial({ color: col });
+    const book = box(bw, bh, bd, bmat);
+    // Slight tilt on some books
+    book.rotation.z = rnd(-0.06, 0.06);
+    book.position.set(curX + bw/2, shelfY + bh/2, shelfZ);
+    parent.add(book);
+
+    // Gold spine line on some
+    if (Math.random() > 0.5) {
+      const spine = box(bw + 0.5, 3, bd + 0.5, MAT.metal);
+      spine.position.set(curX + bw/2, shelfY + bh * rnd(0.25, 0.75), shelfZ);
+      parent.add(spine);
+    }
+
+    curX += bw + rnd(1, 4);
+    if (Math.random() > 0.88) curX += rnd(8, 20); // gap
+  }
+}
+
+// ─── FIREPLACE ───────────────────────────────────────────────
+function buildFireplace(x, y, z) {
+  const g = new THREE.Group();
+
+  // Surround
+  const surW = 200, surH = 260, surD = 60;
+  const outer = box(surW, surH, surD, MAT.trim);
+  outer.position.y = surH/2;
+  g.add(outer);
+
+  // Opening (cut with darker box)
+  const opening = box(140, 180, surD + 2, new THREE.MeshLambertMaterial({ color: 0x080402 }));
+  opening.position.set(0, 100, 1);
+  g.add(opening);
+
+  // Mantel
+  const mantel = box(surW + 40, 20, surD + 30, MAT.wood);
+  mantel.position.y = surH + 10;
+  g.add(mantel);
+
+  // Hearth slab
+  const hearth = box(surW + 30, 14, surD + 40, MAT.woodDark);
+  hearth.position.y = 7;
+  g.add(hearth);
+
+  // Ember glow mesh
+  const ember = box(100, 8, 30, new THREE.MeshBasicMaterial({ color: 0xff3300 }));
+  ember.position.set(0, 24, 10);
+  g.add(ember);
+  const emberTop = box(80, 4, 26, new THREE.MeshBasicMaterial({ color: 0xff8800 }));
+  emberTop.position.set(0, 28, 10);
+  g.add(emberTop);
+
+  // Mantel decorations — candles & books
+  for (let i = -1; i <= 1; i += 2) {
+    const candle = box(10, 40, 10, new THREE.MeshLambertMaterial({ color: 0xf0e0c0 }));
+    candle.position.set(i * 70, surH + 30, 0);
+    g.add(candle);
+    const flame = box(6, 14, 6, new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
+    flame.position.set(i * 70, surH + 57, 0);
+    g.add(flame);
+  }
+
+  g.position.set(x, y, z);
+  scene.add(g);
+}
+
+// ─── READING TABLES ──────────────────────────────────────────
+function buildReadingTables() {
+  const t1 = makeTable(0, 0, -100, 360, 200, 140);
+  t1.userData.editId = 'reading_table'; editableObjects.push(t1);
+
+  const c1 = makeArmchair(-260, 0, -RD/2 + 240, Math.PI * 0.15);
+  c1.userData.editId = 'armchair_left'; editableObjects.push(c1);
+
+  const c2 = makeArmchair(260, 0, -RD/2 + 240, -Math.PI * 0.15);
+  c2.userData.editId = 'armchair_right'; editableObjects.push(c2);
+
+  const t2 = makeTable(RW/2 - 120, 0, 120, 160, 120, 80);
+  t2.userData.editId = 'side_desk'; editableObjects.push(t2);
+
+  const s1 = makeStool(RW/2 - 160, 0, 140);
+  s1.userData.editId = 'stool'; editableObjects.push(s1);
+}
+
+function makeTable(x, y, z, w, d, h) {
+  const g = new THREE.Group();
+  const top = box(w, 18, d, MAT.wood);
+  top.position.y = h;
+  g.add(top);
+  // Legs
+  const legPos = [[-w/2+12, h/2, -d/2+12],[w/2-12,h/2,-d/2+12],[-w/2+12,h/2,d/2-12],[w/2-12,h/2,d/2-12]];
+  for (const p of legPos) {
+    const leg = box(14, h, 14, MAT.woodDark);
+    leg.position.set(...p);
+    g.add(leg);
+  }
+  // Apron
+  const apronF = box(w - 40, 20, 10, MAT.woodDark);
+  apronF.position.set(0, h - 14, d/2 - 8);
+  g.add(apronF);
+  const apronB = apronF.clone();
+  apronB.position.z = -d/2 + 8;
+  g.add(apronB);
+
+  // Books/papers on table
+  for (let i = 0; i < 3; i++) {
+    const bk = box(rnd(30,55), rnd(4,10), rnd(40,65),
+      new THREE.MeshLambertMaterial({ color: BOOK_COLORS[Math.floor(Math.random()*BOOK_COLORS.length)] }));
+    bk.position.set(rnd(-w/2+40, w/2-40), h + 6 + i*5, rnd(-d/2+20, d/2-20));
+    bk.rotation.y = rnd(-0.4, 0.4);
+    g.add(bk);
+  }
+  // Candle on table
+  const c = box(8, 35, 8, new THREE.MeshLambertMaterial({ color: 0xf0e0c0 }));
+  c.position.set(rnd(-40,40), h + 18, rnd(-20,20));
+  g.add(c);
+  const fl = box(5, 12, 5, new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
+  fl.position.set(c.position.x, h + 41, c.position.z);
+  g.add(fl);
+  const cLight = new THREE.PointLight(0xff9900, 0.7, 350);
+  cLight.position.set(c.position.x, h + 50, c.position.z);
+  g.add(cLight);
+
+  g.position.set(x, y, z);
+  scene.add(g);
+  return g;
+}
+
+function makeStool(x, y, z) {
+  const g = new THREE.Group();
+  const seat = box(60, 10, 60, MAT.wood);
+  seat.position.y = 70;
+  g.add(seat);
+  for (const [px,pz] of [[-20,20-20],[20,-20+20]]) {
+    const leg = box(10, 70, 10, MAT.woodDark);
+    leg.position.set(px, 35, pz);
+    g.add(leg);
+  }
+  g.position.set(x, y, z);
+  scene.add(g);
+  return g;
+}
+
+function makeArmchair(x, y, z, rotY) {
+  const g = new THREE.Group();
+  const fabric = new THREE.MeshLambertMaterial({ color: 0x4a2a18 });
+  const dark = MAT.woodDark;
+
+  // Seat
+  const seat = box(110, 18, 100, fabric);
+  seat.position.y = 52;
+  g.add(seat);
+  // Back
+  const back = box(110, 140, 16, fabric);
+  back.position.set(0, 120, -42);
+  g.add(back);
+  // Arms
+  for (const sx of [-55, 55]) {
+    const arm = box(16, 70, 100, fabric);
+    arm.position.set(sx, 80, 0);
+    g.add(arm);
+    const armTop = box(20, 10, 105, fabric);
+    armTop.position.set(sx, 118, 0);
+    g.add(armTop);
+  }
+  // Legs
+  for (const [px,pz] of [[-44,40],[ 44,40],[-44,-40],[ 44,-40]]) {
+    const leg = box(10, 50, 10, dark);
+    leg.position.set(px, 25, pz);
+    g.add(leg);
+  }
+
+  g.rotation.y = rotY;
+  g.position.set(x, y, z);
+  scene.add(g);
+  return g;
+}
+
+// ─── GALLERY (paintings on back wall above shelves) ──────────
+// ─── EVIDENCE BOARD (freestanding easel) ─────────────────────
+function buildEvidenceBoard() {
+  const g = new THREE.Group();
+
+  // Easel legs
+  const legMat = new THREE.MeshLambertMaterial({ color: 0x2a1a08 });
+  for (const [lx, lz, ry] of [[-40, -10, 0.18], [40, -10, -0.18], [0, 30, 0]]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(5, 7, 280, 8), legMat);
+    leg.position.set(lx, 140, lz);
+    leg.rotation.z = ry;
+    g.add(leg);
+  }
+  // Cross brace
+  const brace = new THREE.Mesh(new THREE.BoxGeometry(90, 8, 8), legMat);
+  brace.position.set(0, 80, 0);
+  g.add(brace);
+
+  // Board backing
+  const boardMat = new THREE.MeshLambertMaterial({ color: 0x1a0e06 });
+  const board = new THREE.Mesh(new THREE.BoxGeometry(360, 480, 12), boardMat);
+  board.position.set(0, 380, 0);
+  g.add(board);
+
+  // Cork surface
+  const corkMat = new THREE.MeshLambertMaterial({ color: 0x8b6914 });
+  const cork = new THREE.Mesh(new THREE.BoxGeometry(340, 460, 6), corkMat);
+  cork.position.set(0, 380, 7);
+  g.add(cork);
+
+  // Header label
+  const headerMat = new THREE.MeshLambertMaterial({ color: 0x3a0a0a });
+  const header = new THREE.Mesh(new THREE.BoxGeometry(300, 40, 4), headerMat);
+  header.position.set(0, 590, 8);
+  g.add(header);
+
+  // Pin dots (decorative)
+  const pinMat = new THREE.MeshLambertMaterial({ color: 0xcc2222 });
+  for (let i = 0; i < 8; i++) {
+    const pin = new THREE.Mesh(new THREE.SphereGeometry(5, 6, 6), pinMat);
+    pin.position.set(-130 + i * 38, 570, 12);
+    g.add(pin);
+  }
+
+  // String lines (red yarn connecting clues)
+  const stringMat = new THREE.MeshLambertMaterial({ color: 0xcc1111 });
+  for (let i = 0; i < 5; i++) {
+    const str = new THREE.Mesh(new THREE.BoxGeometry(180 + i * 20, 2, 2), stringMat);
+    str.position.set(-20 + i * 10, 300 + i * 40, 12);
+    str.rotation.z = -0.3 + i * 0.15;
+    g.add(str);
+  }
+
+  // Photo cards (suspect name placeholders)
+  const cardMat = new THREE.MeshLambertMaterial({ color: 0xf0e8d0 });
+  const cardPositions = [
+    [-110, 520], [110, 520],
+    [-110, 450], [0, 450], [110, 450],
+    [-110, 380], [0, 380], [110, 380],
+    [-110, 310], [0, 310], [110, 310],
+    [-110, 240], [0, 240], [110, 240],
+    [0, 170],
+  ];
+  cardPositions.forEach(([cx, cy]) => {
+    const card = new THREE.Mesh(new THREE.BoxGeometry(58, 42, 3), cardMat);
+    card.position.set(cx, cy, 11);
+    g.add(card);
+    // Photo area
+    const photo = new THREE.Mesh(new THREE.BoxGeometry(44, 32, 2),
+      new THREE.MeshLambertMaterial({ color: 0xc8a870 }));
+    photo.position.set(cx, cy + 4, 13);
+    g.add(photo);
+  });
+
+  // Interaction marker
+  const marker = new THREE.Object3D();
+  marker.position.set(0, PLAYER_Y, 0);
+  marker.userData.isBoardMarker = true;
+  g.add(marker);
+
+  // Place board in room — back-left area, facing player
+  g.position.set(-160, 0, -RD/2 + 200);
+  g.rotation.y = Math.PI / 6;
+  scene.add(g);
+
+  window._boardMarker = marker;
+  window._boardGroup = g;
+  g.userData.editId = 'evidence_board'; editableObjects.push(g);
+}
+
+// ─── EVIDENCE BOARD SYSTEM ────────────────────────────────────────
+const BOARD_STORE = 'crowsnest_board_v1';
+const NOTES_STORE = 'crowsnest_ev_notes';
+
+function initInterviewSystem() {
+  const style = document.createElement('style');
+  style.textContent = `
+    #boardOverlay {
+      display:none; position:fixed; inset:0;
+      background:rgba(0,0,0,0.95); z-index:800;
+      align-items:center; justify-content:center;
+    }
+    #boardOverlay.open { display:flex; }
+    #boardMain {
+      display: none !important;
+    }
+    #boardTopBar {
+      padding:12px 20px; border-bottom:1px solid rgba(200,170,80,0.2);
+      display:flex; justify-content:space-between; align-items:center; flex-shrink:0;
+    }
+    #boardTopBar h2 { margin:0; font:700 20px Georgia,serif; color:#d4b96a; }
+    #boardTopBar p { margin:3px 0 0; font:14px system-ui; color:#7a6a40; }
+    #boardCloseBtn { background:none; border:none; color:#7a6a40; font-size:26px; cursor:pointer; padding:4px 8px; }
+    #boardCloseBtn:hover { color:#d4b96a; }
+    #boardTabs { display:flex; border-bottom:1px solid rgba(200,170,80,0.15); flex-shrink:0; }
+    .board-tab {
+      padding:9px 20px; font:600 14px system-ui; color:#7a6a40; cursor:pointer;
+      border-bottom:2px solid transparent; text-transform:uppercase; letter-spacing:0.6px;
+      transition:all 0.2s;
+    }
+    .board-tab.active { color:#d4b96a; border-bottom-color:#d4b96a; }
+    .board-tab:hover:not(.active) { color:#c8a850; }
+    /* ── DRAG BOARD ── */
+    #boardPane-board {
+      flex:1; position:relative; overflow:hidden; display:none;
+      background: radial-gradient(ellipse at 50% 50%, #1a1408 0%, #0d0b07 100%);
+      cursor:default;
+    }
+    #boardPane-board.active { display:block; }
+    #boardCanvas { position:absolute; inset:0; pointer-events:none; }
+    .db-card {
+      position:absolute; background:#1a1408; border:1px solid rgba(200,170,80,0.3);
+      border-radius:8px; padding:10px 12px; cursor:grab; user-select:none;
+      min-width:120px; max-width:160px; font-family:Georgia,serif;
+      box-shadow:2px 3px 10px rgba(0,0,0,0.6);
+      transition:box-shadow 0.15s;
+    }
+    .db-card:active { cursor:grabbing; box-shadow:4px 6px 20px rgba(0,0,0,0.8); }
+    .db-card.suspect { border-color:rgba(200,170,80,0.4); }
+    .db-card.victim { border-color:#cc4444; background:#1a0808; }
+    .db-card.coroner { border-color:rgba(100,200,200,0.4); background:#0a1418; }
+    .db-card.coroner .db-card-name { color:#88dddd; }
+    .db-card.coroner .db-card-label { color:#4a8a8a; }
+    .db-card-coroner-clues { font:italic 11px Georgia,serif; color:#7aadad; margin-top:4px; line-height:1.5; }
+    .db-card.evidence { border-color:rgba(100,180,100,0.4); background:#0e1a0e; }
+    .db-card-label {
+      font:700 11px system-ui; color:#7a6a40; text-transform:uppercase;
+      letter-spacing:0.8px; margin-bottom:5px;
+    }
+    .db-card-name { font:700 15px Georgia,serif; color:#d4b96a; margin-bottom:3px; line-height:1.3; }
+    .db-card.victim .db-card-name { color:#ff8888; }
+    .db-card-role { font:13px Georgia,serif; color:#7a6a40; margin-bottom:6px; }
+    .db-card-note {
+      width:100%; background:rgba(255,255,255,0.03); border:1px solid rgba(200,170,80,0.12);
+      border-radius:4px; color:#a09060; font:italic 13px Georgia,serif;
+      padding:4px 6px; resize:none; outline:none; height:40px; box-sizing:border-box;
+    }
+    .db-card-note:focus { border-color:rgba(200,170,80,0.35); }
+    .db-card-connect {
+      position:absolute; bottom:4px; right:6px; font-size:13px; color:#7a6a40;
+      cursor:pointer; background:none; border:none; padding:2px 4px;
+    }
+    .db-card-connect:hover { color:#d4b96a; }
+    .db-card-connect.active { color:#cc4444; }
+    .db-card-remove {
+      position:absolute; top:4px; right:6px; font-size:14px; color:#aa8844;
+      cursor:pointer; background:none; border:none; padding:2px 5px; line-height:1;
+      border-radius:4px;
+    }
+    .db-card-remove:hover { color:#cc4444; background:rgba(204,68,68,0.12); }
+    .db-card-innocent-row {
+      display:flex; align-items:center; gap:6px; margin-top:5px;
+      font:12px Georgia,serif; color:#7a6a40;
+    }
+    .db-card-innocent-row input[type=checkbox] { accent-color:#4a8a4a; width:14px; height:14px; cursor:pointer; }
+    .db-card.innocent {
+      opacity:0.55; border-color:rgba(100,180,100,0.35);
+      background:#0a1208;
+    }
+    .db-card.innocent .db-card-name { text-decoration:line-through; color:#7a9a7a; }
+    .db-card.innocent .db-card-label { color:#4a6a4a; }
+    #boardConnectHint {
+      position:absolute; top:10px; left:50%; transform:translateX(-50%);
+      background:rgba(0,0,0,0.8); color:#cc8844; font:14px system-ui;
+      padding:6px 14px; border-radius:6px; pointer-events:none; display:none;
+    }
+    #boardToolbar {
+      position:absolute; bottom:12px; right:12px; display:flex; gap:8px;
+    }
+    .board-tool-btn {
+      background:rgba(20,16,8,0.9); border:1px solid rgba(200,170,80,0.3);
+      color:#c8a850; font:13px system-ui; padding:6px 12px; border-radius:6px;
+      cursor:pointer;
+    }
+    .board-tool-btn:hover { border-color:#d4b96a; color:#d4b96a; }
+    /* ── EVIDENCE TAB ── */
+    #boardPane-evidence {
+      flex:1; overflow-y:auto; padding:20px; display:none;
+      flex-wrap:wrap; align-content:flex-start; gap:14px;
+    }
+    #boardPane-evidence.active { display:flex; }
+    /* Notes pane */
+    #boardPane-notes {
+      flex:1; overflow-y:auto; padding:24px; display:none; background:#0a0807;
+    }
+    #boardPane-notes.active { display:block; }
+    #notesTitle { font:700 18px Georgia,serif; color:#d4b96a; margin:0 0 16px; }
+    #boardNotesArea {
+      width:100%; height:calc(100% - 60px); min-height:400px;
+      background:rgba(255,255,255,0.03); border:1px solid rgba(200,170,80,0.2);
+      border-radius:10px; color:#c8b890; font:16px/1.8 Georgia,serif;
+      padding:16px 18px; resize:none; outline:none; box-sizing:border-box;
+    }
+    #boardNotesArea:focus { border-color:rgba(200,170,80,0.45); }
+    #notesSavedMsg { font:12px system-ui; color:#70c080; margin-top:8px; display:none; }
+    /* Bench pane */
+    #boardPane-bench {
+      flex:1; overflow-y:auto; padding:20px; display:none;
+      flex-wrap:wrap; align-content:flex-start; gap:14px;
+      background:#0a0807;
+    }
+    #boardPane-bench.active { display:flex; }
+    .bench-card {
+      background:#1a1408; border:1px solid rgba(200,170,80,0.2);
+      border-radius:8px; padding:12px 14px; width:calc(33% - 10px);
+      min-width:160px; font-family:Georgia,serif; cursor:pointer; position:relative;
+    }
+    .bench-card-topbar { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom:2px; }
+    .bench-card-topbar-actions { display:flex; align-items:center; gap:6px; flex-shrink:0; margin-top:1px; }
+    .bench-innocent-cb { width:20px; height:20px; accent-color:#4a8a4a; cursor:pointer; flex-shrink:0; }
+    .bench-card.innocent { opacity:0.55; border-color:rgba(100,180,100,0.35); background:#0a1208; }
+    .bench-card.innocent .bench-card-name { text-decoration:line-through; color:#7a9a7a; }
+    .bench-card-name { font:700 15px Georgia,serif; color:#d4b96a; margin-bottom:2px; }
+    .bench-card-role { font:13px Georgia,serif; color:#7a6a40; margin-bottom:8px; }
+    .bench-card-note {
+      width:100%; background:rgba(255,255,255,0.03); border:1px solid rgba(200,170,80,0.12);
+      border-radius:4px; color:#a09060; font:italic 13px Georgia,serif;
+      padding:4px 6px; resize:none; outline:none; height:36px; box-sizing:border-box;
+      margin-bottom:8px;
+    }
+    .bench-move-btn {
+      width:100%; padding:6px; background:rgba(200,170,80,0.1);
+      border:1px solid rgba(200,170,80,0.25); border-radius:5px;
+      color:#c8a850; font:13px system-ui; cursor:pointer;
+    }
+    .bench-move-btn:hover { background:rgba(200,170,80,0.2); }
+    .bench-move-btn.on-board { background:rgba(80,160,80,0.15); border-color:rgba(80,200,80,0.3); color:#70c080; }
+    #bench-empty { color:#5a4a28; font:italic 16px Georgia,serif; text-align:center; padding:40px; width:100%; }
+    .ev-card {
+      background:#1a1408; border:1px solid rgba(200,170,80,0.25); border-radius:8px;
+      padding:14px; width:calc(33% - 10px); min-width:180px; position:relative;
+      font:15px/1.6 Georgia,serif; color:#c8b890; cursor:pointer;
+    }
+    .ev-card-type { font:700 11px system-ui; color:#7a6a40; text-transform:uppercase; letter-spacing:1px; margin-bottom:6px; }
+    .ev-card-text { color:#c8b890; font:15px/1.6 Georgia,serif; margin-bottom:8px; }
+    .ev-card-note {
+      width:100%; background:rgba(255,255,255,0.04); border:1px solid rgba(200,170,80,0.15);
+      border-radius:4px; color:#a09060; font:italic 13px Georgia,serif; padding:6px 8px;
+      resize:vertical; min-height:48px; outline:none; box-sizing:border-box;
+    }
+    .ev-card-note:focus { border-color:rgba(200,170,80,0.4); }
+    .ev-card-pin { position:absolute; top:-6px; left:50%; transform:translateX(-50%); color:#cc4444; font-size:18px; }
+    .ev-card-remove { position:absolute; top:6px; right:8px; background:none; border:none; color:#7a6a40; font-size:16px; cursor:pointer; padding:0; line-height:1; }
+    .ev-card-remove:hover { color:#cc4444; }
+    #ev-empty { color:#5a4a28; font:italic 16px Georgia,serif; text-align:center; padding:40px; width:100%; }
+    /* ── INTERVIEW PANEL (slide in from right) ── */
+    #interviewPanel {
+      position:absolute; right:0; top:0; bottom:0; width:320px;
+      background:#0f0c08; border-left:1px solid rgba(200,170,80,0.2);
+      overflow-y:auto; padding:20px; display:none; z-index:10;
+    }
+    #interviewPanel.open { display:block; }
+    #interviewCloseBtn { background:none; border:none; color:#7a6a40; font-size:22px; cursor:pointer; float:right; }
+    #interviewCloseBtn:hover { color:#d4b96a; }
+    #iName { font:700 20px Georgia,serif; color:#d4b96a; margin:24px 0 4px; }
+    #iRole { font:13px system-ui; color:#7a6a40; margin-bottom:14px; }
+    #iMotive {
+      background:rgba(255,255,255,0.03); border:1px solid rgba(200,170,80,0.12);
+      border-radius:8px; padding:10px 12px; margin-bottom:14px;
+      font:italic 14px/1.6 Georgia,serif; color:#a09060;
+    }
+    #iMotiveLabel { font:700 11px system-ui; color:#7a6a40; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:5px; }
+    .q-btn {
+      display:block; width:100%; padding:9px 12px; margin-bottom:6px;
+      background:rgba(255,255,255,0.04); border:1px solid rgba(200,170,80,0.15);
+      border-radius:7px; color:#c8b890; font:14px Georgia,serif;
+      cursor:pointer; text-align:left; transition:all 0.15s;
+    }
+    .q-btn:hover { background:rgba(200,170,80,0.1); border-color:rgba(200,170,80,0.3); }
+    .q-btn.locked { opacity:0.35; cursor:not-allowed; }
+    #iAnswer {
+      background:rgba(255,255,255,0.03); border:1px solid rgba(200,170,80,0.15);
+      border-radius:8px; padding:12px 14px; margin-top:8px;
+      font:14px/1.7 Georgia,serif; color:#c8b890; display:none;
+    }
+    #iAnswer.open { display:block; }
+    #iAnswerSpeaker { font:700 13px system-ui; color:#d4b96a; margin-bottom:6px; }
+    #iEvasive {
+      background:rgba(40,80,40,0.3); border:1px solid rgba(80,180,80,0.3);
+      border-radius:6px; padding:8px 12px; font:italic 13px Georgia,serif;
+      color:#90e090; display:none; margin-top:8px;
+    }
+    #iEvasive.show { display:block; }
+    /* ── FULL-SCREEN CARD MODAL ── */
+    #cardModal {
+      display:none; position:fixed; inset:0; z-index:1200;
+      background:rgba(0,0,0,0.92); align-items:center; justify-content:center;
+    }
+    #cardModal.open { display:flex; }
+    #cardModalBox {
+      background:#12100a; border:1px solid rgba(200,170,80,0.45);
+      border-radius:16px; width:min(680px,92vw); max-height:88vh;
+      overflow-y:auto; padding:40px 48px; position:relative;
+      box-shadow:0 12px 80px rgba(0,0,0,0.95);
+    }
+    #cardModalClose {
+      position:absolute; top:16px; right:20px; background:none; border:none;
+      color:#7a6a40; font-size:28px; cursor:pointer; line-height:1;
+    }
+    #cardModalClose:hover { color:#d4b96a; }
+    #cardModalLabel { font:700 13px system-ui; color:#7a6a40; text-transform:uppercase; letter-spacing:1.5px; margin-bottom:12px; }
+    #cardModalName { font:700 34px Georgia,serif; color:#d4b96a; margin-bottom:6px; line-height:1.2; }
+    #cardModal.victim-type #cardModalName { color:#ff8888; }
+    #cardModalRole { font:18px Georgia,serif; color:#7a6a40; margin-bottom:24px; }
+    #cardModalMeta { margin-bottom:24px; display:flex; flex-direction:column; gap:8px; }
+    .cm-meta-row { font:16px Georgia,serif; color:#c8a860; }
+    #cardModalNotesLabel { font:700 12px system-ui; color:#7a6a40; text-transform:uppercase; letter-spacing:1px; margin-bottom:8px; }
+    #cardModalNotes {
+      width:100%; background:rgba(255,255,255,0.04); border:1px solid rgba(200,170,80,0.2);
+      border-radius:8px; color:#a09060; font:italic 16px/1.6 Georgia,serif;
+      padding:12px 14px; resize:vertical; min-height:90px; outline:none;
+      box-sizing:border-box;
+    }
+    #cardModalNotes:focus { border-color:rgba(200,170,80,0.5); }
+    #cardModalInterviewBtn {
+      display:none; margin-top:24px; width:100%; padding:14px;
+      background:rgba(200,170,80,0.12); border:1px solid rgba(200,170,80,0.35);
+      border-radius:10px; color:#d4b96a; font:600 16px Georgia,serif; cursor:pointer;
+    }
+    #cardModalInterviewBtn:hover { background:rgba(200,170,80,0.22); }
+    #boardHint {
+      position:fixed; bottom:100px; left:50%; transform:translateX(-50%);
+      background:rgba(0,0,0,0.82); color:#ffdd88;
+      font:15px/1 system-ui,Arial; padding:10px 22px; border-radius:8px;
+      display:none; z-index:400; pointer-events:none; white-space:nowrap;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const overlay = document.createElement('div');
+  overlay.id = 'boardOverlay';
+  overlay.innerHTML = `
+    <div id="boardMain">
+      <div id="boardTopBar">
+        <div>
+          <h2>🔍 Bull's Evidence Board — Crowsnest Castle</h2>
+          <p>Drag cards · Click 🔗 to connect with string · Double-click suspect to interview</p>
+        </div>
+        <button id="boardCloseBtn">✕</button>
+      </div>
+      <div id="boardTabs">
+        <div class="board-tab active" data-tab="board">📌 Investigation Board</div>
+        <div class="board-tab" data-tab="bench">👥 Suspect Bench</div>
+        <div class="board-tab" data-tab="evidence">📋 Evidence Cards</div>
+        <div class="board-tab" data-tab="notes">📝 Notes</div>
+      </div>
+      <div id="boardPane-board" class="active">
+        <canvas id="boardCanvas"></canvas>
+        <div id="boardConnectHint">Click another card to connect with string, or click background to cancel</div>
+        <div id="boardToolbar">
+          <button class="board-tool-btn" id="btnClearStrings">🗑 Clear Strings</button>
+          <button class="board-tool-btn" id="btnResetLayout">↺ Reset Layout</button>
+        </div>
+        <div id="interviewPanel">
+          <button id="interviewCloseBtn">✕</button>
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px;">
+            <div>
+              <div id="iName"></div>
+              <div id="iRole"></div>
+            </div>
+          </div>
+          <div id="iMotive"><div id="iMotiveLabel">Possible Motive</div><div id="iMotiveText"></div></div>
+          <h4 style="margin:0 0 10px;font:700 13px system-ui;color:#7a6a40;text-transform:uppercase">Interview</h4>
+          <div id="iQuestions"></div>
+          <div id="iAnswer"><div id="iAnswerSpeaker"></div><div id="iAnswerText"></div></div>
+          <div id="iEvasive">📝 Evasive answer — noted in Bull's notebook.</div>
+        </div>
+      </div>
+      <div id="boardPane-bench"></div>
+      <div id="boardPane-evidence"></div>
+      <div id="boardPane-notes">
+        <div id="notesTitle">📝 Detective's Notes</div>
+        <textarea id="boardNotesArea" placeholder="Write your notes, theories and observations here..."></textarea>
+        <div id="notesSavedMsg">✓ Saved</div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Full-screen card modal
+  const cardModal = document.createElement('div');
+  cardModal.id = 'cardModal';
+  cardModal.innerHTML = `
+    <div id="cardModalBox">
+      <button id="cardModalClose">✕</button>
+      <div id="cardModalLabel"></div>
+      <div id="cardModalName"></div>
+      <div id="cardModalRole"></div>
+      <div id="cardModalMeta"></div>
+      <div id="cardModalNotesLabel">Notes</div>
+      <textarea id="cardModalNotes" placeholder="Write your notes here..."></textarea>
+      <button id="cardModalInterviewBtn">🎤 Interview this Suspect</button>
+    </div>
+  `;
+  document.body.appendChild(cardModal);
+  document.getElementById('cardModalClose').onclick = closeCardModal;
+  cardModal.addEventListener('click', e => { if (e.target === cardModal) closeCardModal(); });
+  document.getElementById('cardModalInterviewBtn').onclick = () => {
+    closeCardModal();
+    if (cardModal._suspect) openInterview(cardModal._suspect);
+  };
+
+  const hint = document.createElement('div');
+  hint.id = 'boardHint';
+  hint.textContent = 'Press E — Open Evidence Board';
+  document.body.appendChild(hint);
+
+  document.getElementById('boardCloseBtn').onclick = closeBoard;
+  overlay.addEventListener('click', e => { if (e.target.id === 'boardOverlay') closeBoard(); });
+  document.getElementById('interviewCloseBtn').onclick = () => document.getElementById('interviewPanel').classList.remove('open');
+  document.getElementById('btnClearStrings').onclick = () => { _boardStrings = []; _saveBoard(); _drawStrings(); };
+  document.getElementById('btnResetLayout').onclick = () => { _boardPositions = {}; _saveBoard(); buildDragBoard(); };
+
+  // Tab switching
+  document.querySelectorAll('.board-tab').forEach(tab => {
+    tab.onclick = () => {
+      document.querySelectorAll('.board-tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      const which = tab.dataset.tab;
+      document.getElementById('boardPane-board').classList.toggle('active', which === 'board');
+      document.getElementById('boardPane-bench').classList.toggle('active', which === 'bench');
+      document.getElementById('boardPane-evidence').classList.toggle('active', which === 'evidence');
+      document.getElementById('boardPane-notes').classList.toggle('active', which === 'notes');
+      if (which === 'evidence') buildEvidencePane();
+      if (which === 'bench') buildBenchPane();
+      if (which === 'board') { buildDragBoard(); setTimeout(_drawStrings, 50); }
+      if (which === 'notes') {
+        const area = document.getElementById('boardNotesArea');
+        area.value = localStorage.getItem('crowsnest_detective_notes') || '';
+      }
+    };
+  });
+
+  // Notes auto-save
+  setTimeout(() => {
+    const area = document.getElementById('boardNotesArea');
+    if (area) {
+      area.addEventListener('input', () => {
+        localStorage.setItem('crowsnest_detective_notes', area.value);
+        const msg = document.getElementById('notesSavedMsg');
+        if (msg) { msg.style.display = 'block'; clearTimeout(msg._t); msg._t = setTimeout(() => msg.style.display = 'none', 1500); }
+      });
+    }
+  }, 200);
+}
+
+// ── Bench state ─────────────────────────────────────────────────────────
+const BENCH_STORE = 'crowsnest_bench_v1';
+function _loadBench() {
+  try { return JSON.parse(localStorage.getItem(BENCH_STORE) || '{}'); } catch(e) { return {}; }
+}
+function _saveBench(data) {
+  localStorage.setItem(BENCH_STORE, JSON.stringify(data));
+}
+
+function buildBenchPane() {
+  if (!window._scenario || typeof MysteryEngine === 'undefined') return;
+  const pane = document.getElementById('boardPane-bench');
+  pane.innerHTML = '';
+  const suspects = MysteryEngine.SUSPECTS;
+  const bench = _loadBench();
+  const savedNotes = JSON.parse(localStorage.getItem(NOTES_STORE) || '{}');
+
+  suspects.forEach(s => {
+    const key = 'suspect_' + s.id;
+    const onBoard = bench[key] === 'board';
+    const noteKey = 'bench_' + key;
+
+    const card = document.createElement('div');
+    card.className = 'bench-card';
+    const isInnocentBench = bench['innocent_suspect_' + s.id] === true;
+    const isSuspectBench = bench['suspect_' + s.id] === true;
+    if (isInnocentBench) card.classList.add('innocent');
+    card.innerHTML = `
+      <div class="bench-card-topbar">
+        <div class="bench-card-name">${s.name}</div>
+      </div>
+      <div class="bench-card-role">${s.role}</div>
+      <textarea class="bench-card-note" placeholder="Notes...">${savedNotes[noteKey]||''}</textarea>
+      <button class="bench-move-btn ${onBoard ? 'on-board' : ''}" data-key="${key}">
+        ${onBoard ? '✓ On Investigation Board — Click to Remove' : '➕ Add to Investigation Board'}
+      </button>
+    `;
+
+    card.querySelector('.bench-card-note').addEventListener('input', e => {
+      const notes = JSON.parse(localStorage.getItem(NOTES_STORE) || '{}');
+      notes[noteKey] = e.target.value;
+      localStorage.setItem(NOTES_STORE, JSON.stringify(notes));
+    });
+
+    card.addEventListener('click', e => {
+      if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return;
+      openCardModal({ key: 'suspect_' + s.id, type: 'suspect', label: 'SUSPECT', name: s.name, role: s.role, suspect: s });
+    });
+
+    card.querySelector('.bench-move-btn').addEventListener('click', function() {
+      const bench = _loadBench();
+      const isOnBoard = bench[key] === 'board';
+      bench[key] = isOnBoard ? 'bench' : 'board';
+      _saveBench(bench);
+      // Update button
+      this.classList.toggle('on-board', !isOnBoard);
+      this.textContent = !isOnBoard ? '✓ On Investigation Board — Click to Remove' : '➕ Add to Investigation Board';
+      // Rebuild board if open
+      if (document.getElementById('boardPane-board').classList.contains('active')) {
+        buildDragBoard();
+      }
+    });
+
+    pane.appendChild(card);
+  });
+}
+
+// ── Card Modal ───────────────────────────────────────────────────────────
+function openCardModal(card) {
+  const modal = document.getElementById('cardModal');
+  modal.className = 'open ' + card.type + '-type';
+  modal._suspect = card.suspect || null;
+  modal._noteKey = 'bd_' + card.key;
+
+  document.getElementById('cardModalLabel').textContent = card.label;
+  document.getElementById('cardModalName').textContent = card.name;
+  document.getElementById('cardModalRole').textContent = card.role || '';
+
+  const meta = document.getElementById('cardModalMeta');
+  meta.innerHTML = '';
+  if (card.crimeRoom) meta.innerHTML += `<div class="cm-meta-row">📍 Found in: ${card.crimeRoom}</div>`;
+  if (card.weapon)    meta.innerHTML += `<div class="cm-meta-row">🔪 Weapon: ${card.weapon}</div>`;
+  if (card.timeOfDeath) meta.innerHTML += `<div class="cm-meta-row">🕐 Time of Death: ${card.timeOfDeath}</div>`;
+  if (card.suspect && card.suspect.motive) meta.innerHTML += `<div class="cm-meta-row" style="margin-top:8px;color:#a09060;font-style:italic">Motive: ${card.suspect.motive}</div>`;
+
+  const savedNotes = JSON.parse(localStorage.getItem(NOTES_STORE) || '{}');
+  const notesEl = document.getElementById('cardModalNotes');
+  notesEl.value = savedNotes[modal._noteKey] || '';
+  notesEl.oninput = () => {
+    const notes = JSON.parse(localStorage.getItem(NOTES_STORE) || '{}');
+    notes[modal._noteKey] = notesEl.value;
+    localStorage.setItem(NOTES_STORE, JSON.stringify(notes));
+  };
+
+  const intBtn = document.getElementById('cardModalInterviewBtn');
+  intBtn.style.display = card.suspect ? 'block' : 'none';
+}
+function closeCardModal() {
+  document.getElementById('cardModal').classList.remove('open');
+}
+
+// ── Board state ──────────────────────────────────────────────────────────
+let _boardPositions = {};
+let _boardStrings   = [];
+let _connectFrom    = null;
+
+function _loadBoard() {
+  try { const d = JSON.parse(localStorage.getItem(BOARD_STORE) || '{}'); _boardPositions = d.pos || {}; _boardStrings = d.strings || []; } catch(e) {}
+}
+function _saveBoard() {
+  localStorage.setItem(BOARD_STORE, JSON.stringify({ pos: _boardPositions, strings: _boardStrings }));
+}
+
+// ── Drag board ───────────────────────────────────────────────────────────
+function buildDragBoard() {
+  if (!window._scenario || typeof MysteryEngine === 'undefined') return;
+  _loadBoard();
+  const pane = document.getElementById('boardPane-board');
+  // Remove old cards
+  pane.querySelectorAll('.db-card').forEach(c => c.remove());
+
+  const pw = pane.offsetWidth || 800;
+  const ph = pane.offsetHeight || 600;
+
+  // Resize canvas
+  const canvas = document.getElementById('boardCanvas');
+  canvas.width = pw; canvas.height = ph;
+
+  const suspects = MysteryEngine.SUSPECTS;
+  const allCards = [];
+
+  // Victim card
+  const vKey = 'victim';
+  const vDef = _boardPositions[vKey] || { x: pw/2 - 70, y: ph/2 - 40 };
+  allCards.push({ key: vKey, type: 'victim', label: 'VICTIM', name: _scenario.victim.name, role: _scenario.victim.role || 'Deceased', suspect: null,
+    crimeRoom: _scenario.crimeRoom ? _scenario.crimeRoom.name : '', weapon: '', timeOfDeath: _scenario.timeOfDeath || '' });
+
+  // Coroner "Cause of Death" card — auto-fills with collected coroner clues
+  const coronerClues = (_scenario.clues || []).filter(c => c.found && c.type === 'coroner');
+  const coronerText = coronerClues.length > 0
+    ? weaponCluesFound 
+      ? coronerClues.map(c => '• ' + c.text.slice(0, 100) + '…').join('<br>')
+      : `${coronerClues.length} autopsy finding${coronerClues.length !== 1 ? 's' : ''} collected — find weapon clues to reveal.`
+    : 'No autopsy findings yet. Find coroner clues (🔬) in the castle.';
+  
+  // Suspect cards — only those marked as on the board in bench state
+  const _bench = _loadBench();
+  
+  // Add coroner card if on board
+  if (_bench['coroner'] === 'board' || !_bench.hasOwnProperty('coroner')) {
+    allCards.push({ key: 'coroner', type: 'coroner', label: 'CAUSE OF DEATH', name: "Coroner's Report", role: `${coronerClues.length} finding${coronerClues.length !== 1 ? 's' : ''} collected`, coronerText, suspect: null });
+  }
+
+  suspects.forEach((s, i) => {
+    const key = 'suspect_' + s.id;
+    if (_bench[key] !== 'board') return; // skip if on bench
+    const angle = (i / suspects.length) * Math.PI * 2 - Math.PI / 2;
+    const r = Math.min(pw, ph) * 0.35;
+    allCards.push({ key, type: 'suspect', label: 'SUSPECT', name: s.name, role: s.role, suspect: s });
+  });
+
+  // Evidence cards removed from drag board — shown in Evidence Cards tab only
+
+  allCards.forEach(card => {
+    const pos = _boardPositions[card.key] || (card.key === 'victim' ? { x: pw/2-70, y: ph/2-40 } :
+      allCards.indexOf(card) < suspects.length + 1 ?
+      (() => { const i = allCards.indexOf(card) - 1; const angle = (i / suspects.length) * Math.PI * 2 - Math.PI/2; const r = Math.min(pw,ph)*0.35; return { x: pw/2+r*Math.cos(angle)-70, y: ph/2+r*Math.sin(angle)-50 }; })() :
+      { x: 20 + (allCards.indexOf(card) % 4) * 170, y: ph - 120 });
+
+    const el = document.createElement('div');
+    el.className = 'db-card ' + card.type;
+    el.dataset.key = card.key;
+    el.style.left = Math.max(0, Math.min(pw - 160, pos.x)) + 'px';
+    el.style.top  = Math.max(0, Math.min(ph - 120, pos.y)) + 'px';
+
+    const savedNotes = JSON.parse(localStorage.getItem(NOTES_STORE) || '{}');
+    const noteVal = savedNotes['bd_' + card.key] || '';
+    const _benchState = _loadBench();
+    const isInnocent = _benchState['innocent_' + card.key] === true;
+    if (isInnocent) el.classList.add('innocent');
+
+    el.innerHTML = `
+      <div class="db-card-label">${card.label}</div>
+      <div class="db-card-name">${card.name}</div>
+      ${card.role ? `<div class="db-card-role">${card.role}</div>` : ''}
+      ${card.crimeRoom ? `<div class="db-card-role" style="color:#cc6644;margin-top:4px">📍 ${card.crimeRoom}</div>` : ''}
+      ${card.weapon ? `<div class="db-card-role" style="color:#cc6644">🔪 ${card.weapon}</div>` : ''}
+      ${card.timeOfDeath ? `<div class="db-card-role" style="color:#cc6644">🕐 ${card.timeOfDeath}</div>` : ''}
+      ${card.coronerText ? `<div class="db-card-coroner-clues">${card.coronerText}</div>` : ''}
+      ${card.type !== 'coroner' ? `<textarea class="db-card-note" placeholder="Notes...">${noteVal}</textarea>` : ''}
+      ${card.type === 'suspect' ? `<div class="db-card-innocent-row"><input type="checkbox" class="db-innocent-cb" ${isInnocent ? 'checked' : ''}><label>Innocent</label></div>` : ''}
+      ${(card.type === 'suspect' || card.type === 'coroner') ? `<button class="db-card-remove" title="Remove from board">✕</button>` : ''}
+      <button class="db-card-connect" title="Connect with string">🔗</button>
+    `;
+
+    // Save notes
+    const noteEl = el.querySelector('.db-card-note');
+    if (noteEl) {
+      noteEl.addEventListener('input', e => {
+        const notes = JSON.parse(localStorage.getItem(NOTES_STORE) || '{}');
+        notes['bd_' + card.key] = e.target.value;
+        localStorage.setItem(NOTES_STORE, JSON.stringify(notes));
+        e.stopPropagation();
+      });
+      noteEl.addEventListener('mousedown', e => e.stopPropagation());
+    }
+
+    // Remove (X) button — works for both suspect and coroner cards
+    const removeBtn = el.querySelector('.db-card-remove');
+    if (removeBtn) {
+      removeBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        const b = _loadBench();
+        b[card.key] = 'bench';
+        _saveBench(b);
+        // Remove strings involving this card
+        _boardStrings = _boardStrings.filter(s => s.from !== card.key && s.to !== card.key);
+        _saveBoard();
+        buildDragBoard();
+      });
+    }
+
+    // Innocent checkbox
+    if (card.type === 'suspect') {
+      el.querySelector('.db-innocent-cb').addEventListener('change', e => {
+        e.stopPropagation();
+        const b = _loadBench();
+        b['innocent_' + card.key] = e.target.checked;
+        _saveBench(b);
+        el.classList.toggle('innocent', e.target.checked);
+      });
+      el.querySelector('.db-innocent-cb').addEventListener('mousedown', e => e.stopPropagation());
+      el.querySelector('label').addEventListener('mousedown', e => e.stopPropagation());
+    }
+
+    // Connect button
+    el.querySelector('.db-card-connect').addEventListener('click', e => {
+      e.stopPropagation();
+      if (!_connectFrom) {
+        _connectFrom = card.key;
+        el.querySelector('.db-card-connect').classList.add('active');
+        document.getElementById('boardConnectHint').style.display = 'block';
+      } else if (_connectFrom === card.key) {
+        _connectFrom = null;
+        el.querySelector('.db-card-connect').classList.remove('active');
+        document.getElementById('boardConnectHint').style.display = 'none';
+      } else {
+        _boardStrings.push({ from: _connectFrom, to: card.key });
+        _saveBoard();
+        _drawStrings();
+        // clear from
+        pane.querySelectorAll('.db-card-connect').forEach(b => b.classList.remove('active'));
+        _connectFrom = null;
+        document.getElementById('boardConnectHint').style.display = 'none';
+      }
+    });
+
+    // Cancel connect on background click
+    pane.addEventListener('click', e => {
+      if (e.target === pane || e.target === canvas) {
+        _connectFrom = null;
+        pane.querySelectorAll('.db-card-connect').forEach(b => b.classList.remove('active'));
+        document.getElementById('boardConnectHint').style.display = 'none';
+      }
+    });
+
+    // Double-click to interview
+    if (card.suspect) {
+      el.addEventListener('dblclick', e => { e.stopPropagation(); openInterview(card.suspect); });
+    }
+
+    // Drag
+    _makeDraggable(el, card.key, card);
+    pane.appendChild(el);
+  });
+
+  setTimeout(_drawStrings, 30);
+}
+
+function _makeDraggable(el, key, card) {
+  let ox, oy, startX, startY, dragging = false, moved = false;
+  el.addEventListener('mousedown', e => {
+    if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return;
+    dragging = true; moved = false;
+    startX = e.clientX; startY = e.clientY;
+    ox = el.offsetLeft; oy = el.offsetTop;
+    el.style.zIndex = 100;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const dx = e.clientX - startX, dy = e.clientY - startY;
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
+    if (!moved) return;
+    const pane = document.getElementById('boardPane-board');
+    const pw = pane.offsetWidth, ph = pane.offsetHeight;
+    const nx = Math.max(0, Math.min(pw - el.offsetWidth, ox + dx));
+    const ny = Math.max(0, Math.min(ph - el.offsetHeight, oy + dy));
+    el.style.left = nx + 'px';
+    el.style.top  = ny + 'px';
+    _boardPositions[key] = { x: nx, y: ny };
+    _drawStrings();
+  });
+  document.addEventListener('mouseup', e => {
+    if (!dragging) return;
+    dragging = false;
+    el.style.zIndex = '';
+    if (!moved) {
+      // It was a click — open modal
+      if (e.target.tagName !== 'BUTTON') openCardModal(card);
+    } else {
+      _saveBoard();
+    }
+  });
+}
+
+function _drawStrings() {
+  const canvas = document.getElementById('boardCanvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const pane = document.getElementById('boardPane-board');
+
+  _boardStrings.forEach(s => {
+    const fromEl = pane.querySelector(`[data-key="${s.from}"]`);
+    const toEl   = pane.querySelector(`[data-key="${s.to}"]`);
+    if (!fromEl || !toEl) return;
+    const fx = fromEl.offsetLeft + fromEl.offsetWidth / 2;
+    const fy = fromEl.offsetTop  + fromEl.offsetHeight / 2;
+    const tx = toEl.offsetLeft   + toEl.offsetWidth / 2;
+    const ty = toEl.offsetTop    + toEl.offsetHeight / 2;
+    ctx.beginPath();
+    ctx.moveTo(fx, fy);
+    ctx.lineTo(tx, ty);
+    ctx.strokeStyle = 'rgba(200,50,50,0.65)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([]);
+    ctx.stroke();
+    // Thumbtack dots
+    ctx.beginPath(); ctx.arc(fx, fy, 3, 0, Math.PI*2); ctx.fillStyle = '#cc4444'; ctx.fill();
+    ctx.beginPath(); ctx.arc(tx, ty, 3, 0, Math.PI*2); ctx.fill();
+  });
+}
+
+// ── Interview panel ──────────────────────────────────────────────────────
+function openInterview(s) {
+  const panel = document.getElementById('interviewPanel');
+  const isKiller = window._scenario && s.id === _scenario.killer.id;
+  const cluesFound = (_scenario.clues || []).filter(c => c.found || c.collected).length;
+  const bench = _loadBench();
+
+  document.getElementById('iName').textContent = s.name;
+  document.getElementById('iRole').textContent = s.role;
+  document.getElementById('iMotiveText').textContent = s.motive;
+  document.getElementById('iAnswer').classList.remove('open');
+  document.getElementById('iEvasive').classList.remove('show');
+
+  // Load checkbox states
+  const suspectCb = document.getElementById('iSuspectCb');
+  const innocentCb = document.getElementById('iInnocentCb');
+  suspectCb.checked = bench['suspect_' + s.id] === true;
+  innocentCb.checked = bench['innocent_suspect_' + s.id] === true;
+
+  // Checkbox event listeners
+  suspectCb.onchange = () => {
+    const b = _loadBench();
+    b['suspect_' + s.id] = suspectCb.checked;
+    _saveBench(b);
+  };
+  innocentCb.onchange = () => {
+    const b = _loadBench();
+    b['innocent_suspect_' + s.id] = innocentCb.checked;
+    _saveBench(b);
+  };
+
+  const qDiv = document.getElementById('iQuestions');
+  qDiv.innerHTML = '';
+  const questions = getQuestionsForSuspect(s, isKiller, cluesFound);
+  questions.forEach(q => {
+    const locked = q.minClues > cluesFound;
+    const btn = document.createElement('button');
+    btn.className = 'q-btn' + (locked ? ' locked' : '');
+    btn.textContent = locked ? `🔒 Find ${q.minClues} clues to unlock` : q.question;
+    btn.disabled = locked;
+    btn.onclick = () => {
+      document.getElementById('iAnswerSpeaker').textContent = s.name + ':';
+      document.getElementById('iAnswerText').textContent = isKiller ? q.killer : q.honest;
+      document.getElementById('iAnswer').classList.add('open');
+      if (isKiller) {
+        document.getElementById('iEvasive').classList.add('show');
+        if (window._scenario && typeof MysteryUI !== 'undefined') {
+          const bonus = { id:'interview_'+s.id+'_'+Date.now(), type:'witness', text:'During questioning, '+s.name+' gave an evasive answer: "'+q.killer+'"', found:true, room:'library', bonus:true };
+          if (!window._scenario.clues.some(c => c.text === bonus.text)) {
+            window._scenario.clues.push(bonus);
+            if (typeof MysteryState !== 'undefined') MysteryState.saveOnEvent(window._scenario);
+            MysteryUI.updateHUDCount();
+          }
+        }
+      } else { document.getElementById('iEvasive').classList.remove('show'); }
+    };
+    qDiv.appendChild(btn);
+  });
+  panel.classList.add('open');
+}
+
+// ── Evidence cards tab ───────────────────────────────────────────────────
+function buildEvidencePane() {
+  const pane = document.getElementById('boardPane-evidence');
+  if (!pane) return;
+  const clues = (window._scenario && window._scenario.clues) ? window._scenario.clues.filter(c => c.found || c.collected || c.bonus) : [];
+  pane.innerHTML = '';
+  if (!clues.length) { pane.innerHTML = '<div id="ev-empty">No evidence collected yet.</div>'; return; }
+  const savedNotes = JSON.parse(localStorage.getItem(NOTES_STORE) || '{}');
+  clues.forEach((c, i) => {
+    const card = document.createElement('div');
+    card.className = 'ev-card';
+    const typeLabel = c.type==='document'?'📜 Document':c.type==='physical'?'🔍 Physical':c.type==='witness'?'👁 Witness':'📋 Clue';
+    const noteKey = 'ev_' + (c.id || i);
+    card.innerHTML = `
+      <div class="ev-card-pin">📌</div>
+      <button class="ev-card-remove" title="Remove card">✕</button>
+      <div class="ev-card-type">${typeLabel}</div>
+      <div class="ev-card-text">${c.text || c.title || '(no text)'}</div>
+    `;
+    card.querySelector('.ev-card-remove').addEventListener('click', e => {
+      e.stopPropagation();
+      if (!confirm('Remove this evidence card?')) return;
+      const idx = window._scenario.clues.findIndex(cl => (cl.id || '') === (c.id || '') && cl.text === c.text);
+      if (idx !== -1) window._scenario.clues.splice(idx, 1);
+      if (typeof MysteryState !== 'undefined') MysteryState.saveOnEvent(window._scenario);
+      if (typeof MysteryUI !== 'undefined') MysteryUI.updateHUDCount();
+      buildEvidencePane();
+    });
+    card.addEventListener('click', e => {
+      if (e.target.tagName === 'TEXTAREA' || e.target.classList.contains('ev-card-remove')) return;
+      openCardModal({ key: 'ev_' + (c.id || i), type: 'evidence', label: typeLabel, name: c.text || c.title || '(no text)', role: '', suspect: null });
+    });
+    pane.appendChild(card);
+  });
+}
+
+function getQuestionsForSuspect(s, isKiller, cluesFound) {
+  return [
+    { minClues: 0, question: "Where were you on the night of the murder?",
+      honest: `${s.name} looks you in the eye. "I was nowhere near the scene. You have my word."`,
+      killer: `${s.name} shifts slightly. "I was... elsewhere. Alone. No one can confirm it, I'm afraid."` },
+    { minClues: 4, question: "What do you know about the victim?",
+      honest: `"We were acquainted, nothing more. Their death came as a shock to everyone."`,
+      killer: `"We had our differences. But I would never— that is to say, I had nothing to do with it."` },
+    { minClues: 8, question: "Did you have any conflict with the victim recently?",
+      honest: `${s.name} shakes their head. "None whatsoever. We were on perfectly civil terms."`,
+      killer: `${s.name} looks away briefly. "A minor disagreement. Nothing worth mentioning."` },
+    { minClues: 12, question: "Can you account for the murder weapon?",
+      honest: `${s.name} frowns. "I wouldn't know where to find such a thing. That's a disturbing question."`,
+      killer: `${s.name} hesitates just a moment too long. "No. I've never touched it. Why would I?"` },
+    { minClues: 16, question: "Who do you think is responsible?",
+      honest: `"I truly don't know. But I hope you find whoever did this. It's a terrible business."`,
+      killer: `${s.name} pauses. "There are others here with far more reason than I."` },
+    { minClues: 20, question: "We found evidence that implicates you.",
+      honest: `"Then your evidence is wrong. I am innocent and I will not stand here and be accused."`,
+      killer: `${s.name}'s composure cracks for just a moment. "Evidence can be... misinterpreted."` },
+    { minClues: 24, question: "Where exactly were you between midnight and dawn?",
+      honest: `"In my room, asleep. I sleep soundly. You are welcome to ask the staff."`,
+      killer: `"I told you — alone. I cannot produce a witness for every hour of the night."` },
+    { minClues: 28, question: "We have a witness who places you near the scene.",
+      honest: `${s.name} draws themselves up. "Then your witness is mistaken. I was nowhere near it."`,
+      killer: `${s.name}'s jaw tightens. "That is a lie. Whoever told you that is lying."` },
+    { minClues: 32, question: "Your alibi does not hold up.",
+      honest: `"I understand how it looks. But I swear to you, I did not do this."`,
+      killer: `${s.name} says nothing for a moment. "I want to speak with a solicitor."` },
+    { minClues: 36, question: "I believe you are the killer.",
+      honest: `"You are making a terrible mistake. I demand you look elsewhere."`,
+      killer: `${s.name} stares at you for a long moment, then looks away. "You can't prove anything."` },
+  ];
+}
+
+function openBoard() {
+  document.getElementById('boardOverlay').classList.add('open');
+  // Activate board tab
+  document.querySelectorAll('.board-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'board'));
+  document.getElementById('boardPane-board').classList.add('active');
+  document.getElementById('boardPane-evidence').classList.remove('active');
+  setTimeout(() => { buildDragBoard(); }, 50);
+}
+
+function closeBoard() {
+  document.getElementById('boardOverlay').classList.remove('open');
+}
+
+function showBoardNotification(msg) {
+  const n = document.createElement('div');
+  n.style.cssText = `position:fixed;top:70px;left:50%;transform:translateX(-50%);
+    background:rgba(10,8,4,0.95);border:1px solid rgba(200,170,80,0.5);
+    border-radius:10px;padding:12px 24px;color:#d4b96a;
+    font:13px Georgia,serif;z-index:900;pointer-events:none;`;
+  n.textContent = msg;
+  document.body.appendChild(n);
+  setTimeout(() => n.remove(), 4000);
+}
+
+function buildGallery() {
+  // Sconces on left & right walls (mid-height)
+  for (const sx of [-RW/2 + 22, RW/2 - 22]) {
+    for (const sz of [-200, 200]) {
+      makeSconce(sx, 280, sz, sx < 0 ? Math.PI/2 : -Math.PI/2);
+    }
+  }
+
+  // Portrait above fireplace on back wall
+  makePortrait(0, 320, -RD/2 + 20, 0);
+
+  // Two smaller paintings on back wall
+  makePortrait(-270, 280, -RD/2 + 20, 0, 120, 160);
+  makePortrait( 270, 280, -RD/2 + 20, 0, 120, 160);
+}
+
+function makeSconce(x, y, z, rotY) {
+  const g = new THREE.Group();
+  const arm = box(30, 8, 8, MAT.metal);
+  arm.position.set(15, 0, 0);
+  g.add(arm);
+  const cup = box(16, 20, 16, MAT.metal);
+  cup.position.set(30, -6, 0);
+  g.add(cup);
+  const fl = box(8, 16, 8, new THREE.MeshBasicMaterial({ color: 0xffcc44 }));
+  fl.position.set(30, 8, 0);
+  g.add(fl);
+  const light = new THREE.PointLight(0xff9933, 0.8, 500);
+  light.position.set(30, 20, 0);
+  g.add(light);
+
+  g.rotation.y = rotY;
+  g.position.set(x, y, z);
+  scene.add(g);
+}
+
+function makePortrait(x, y, z, rotY, fw=180, fh=240) {
+  const g = new THREE.Group();
+  // Frame
+  const frame = box(fw + 24, fh + 24, 14, MAT.trim);
+  g.add(frame);
+  // Canvas — dark painterly color
+  const canvasColors = [0x2a1a0a, 0x0a1a2a, 0x1a0a1a, 0x0a2a1a];
+  const canvas = box(fw, fh, 8, new THREE.MeshLambertMaterial({ color: canvasColors[Math.floor(Math.random()*canvasColors.length)] }));
+  canvas.position.z = 4;
+  g.add(canvas);
+  // Abstract figure suggestion (lighter area)
+  const figure = box(fw * 0.4, fh * 0.65, 9, new THREE.MeshLambertMaterial({ color: 0x8a6a40 }));
+  figure.position.set(rnd(-fw*0.1, fw*0.1), rnd(-fh*0.05, fh*0.05), 5);
+  g.add(figure);
+
+  g.rotation.y = rotY;
+  g.position.set(x, y, z);
+  scene.add(g);
+}
+
+// ─── DOORWAY ─────────────────────────────────────────────────
+function buildDoorway() {
+  const doorW = 360, doorH = RH;
+  const trimMat = MAT.trim;
+
+  // Door frame jambs
+  const jambL = box(16, doorH, 16, trimMat);
+  jambL.position.set(-doorW/2 - 8, doorH/2, RD/2 - 2);
+  scene.add(jambL);
+  const jambR = jambL.clone();
+  jambR.position.x = doorW/2 + 8;
+  scene.add(jambR);
+  // No header — door reaches ceiling
+
+  // Door panels (open/ajar)
+  const doorMat = MAT.wood;
+  const panelW = doorW / 2 - 4;
+  const dL = box(panelW, doorH - 10, 10, doorMat);
+  dL.position.set(-doorW/4, doorH/2, RD/2 - 6);
+  dL.rotation.y = 0;
+  scene.add(dL);
+  const dR = dL.clone();
+  dR.position.x = doorW/4;
+  dR.rotation.y = 0;
+  scene.add(dR);
+}
+
+// ─── EXIT / E KEY ────────────────────────────────────────────
+const exitCooldown = Date.now() + 3500;
+let exitTriggered = false;
+let nearExit = false;
+
+function checkExit() {
+  if (exitTriggered) return;
+  if (Date.now() < exitCooldown) return;
+
+  const cx = camera.position.x, cz = camera.position.z;
+  nearExit = Math.abs(cx) < 150 && cz > RD/2 - 200;
+
+  const hint = document.getElementById('doorHint');
+  if (hint) hint.style.display = nearExit ? 'block' : 'none';
+}
+
+function doExit() {
+  if (exitTriggered) return;
+  exitTriggered = true;
+  document.getElementById('doorHint').style.display = 'none';
+  document.getElementById('exitFade').classList.add('show');
+  if(window.SoundSystem)SoundSystem.play('doorOpen');
+  setTimeout(() => { window.location.href = 'floor1.html?from=library'; }, 650);
+}
+
+// ─── INPUT ───────────────────────────────────────────────────
+function onKeyDown(e) {
+  if (e.code === 'KeyM') { toggleEditMode(); return; }
+  if (e.code === 'KeyS' && e.ctrlKey) { e.preventDefault(); saveLayout(); return; }
+  if (EDIT_MODE && selectedObject) {
+    const speed = e.shiftKey ? 2 : 10;
+    let moved = false;
+    if (e.code === 'ArrowUp')    { selectedObject.position.z -= speed; moved = true; }
+    if (e.code === 'ArrowDown')  { selectedObject.position.z += speed; moved = true; }
+    if (e.code === 'ArrowLeft')  { selectedObject.position.x -= speed; moved = true; }
+    if (e.code === 'ArrowRight') { selectedObject.position.x += speed; moved = true; }
+    if (e.code === 'KeyR')       { selectedObject.rotation.y += e.shiftKey ? -0.05 : 0.05; moved = true; }
+    if (moved) { e.preventDefault(); return; }
+  }
+if(e.code==='KeyF'&&window.SoundSystem&&window.EvidenceSystem&&EvidenceSystem._nearIdx>=0)SoundSystem.play('pickup');
+    if (e.code === 'KeyE') {
+    // Check board proximity first
+    if (window._boardGroup) {
+      const bp = window._boardGroup.position;
+      const dx = camera.position.x - bp.x;
+      const dz = camera.position.z - bp.z;
+      if (Math.sqrt(dx*dx + dz*dz) < 280) { openBoard(); return; }
+    }
+    if (nearExit) { doExit(); return; }
+  }
+  if (e.code === 'ArrowUp'    || e.code === 'KeyW') moveForward  = true;
+  if (e.code === 'ArrowDown'  || e.code === 'KeyS') moveBackward = true;
+  if (e.code === 'ArrowLeft')  turnLeft  = true;
+  if (e.code === 'ArrowRight') turnRight = true;
+}
+function onKeyUp(e) {
+  if (e.code === 'ArrowUp'    || e.code === 'KeyW') moveForward  = false;
+  if (e.code === 'ArrowDown'  || e.code === 'KeyS') moveBackward = false;
+  if (e.code === 'ArrowLeft')  turnLeft  = false;
+  if (e.code === 'ArrowRight') turnRight = false;
+}
+
+function updateRotation() {
+  camera.rotation.order = 'YXZ';
+  camera.rotation.set(0, yaw, 0);
+}
+
+// ─── ANIMATE ─────────────────────────────────────────────────
+// Flicker state
+let flickerT = 0;
+
+function animate() {
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = Math.min((now - prevTime) / 1000, 0.05);
+  prevTime = now;
+
+  if (turnLeft)  yaw += TURN * dt;
+  if (turnRight) yaw -= TURN * dt;
+  updateRotation();
+
+  if (moveForward || moveBackward) {
+    const dir = moveForward ? 1 : -1;
+    if(window.SoundSystem)SoundSystem.footstep();
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    fwd.y = 0; fwd.normalize();
+    camera.position.x += fwd.x * dir * SPEED * dt;
+    camera.position.z += fwd.z * dir * SPEED * dt;
+  }
+
+  // Clamp inside room
+  camera.position.x = Math.max(-RW/2 + 60, Math.min(RW/2 - 60, camera.position.x));
+  camera.position.z = Math.max(-RD/2 + 60, Math.min(RD/2 + 10, camera.position.z));
+  camera.position.y = PLAYER_Y;
+
+  // Subtle fire flicker
+  flickerT += dt;
+  const flicker = 0.92 + 0.08 * Math.sin(flickerT * 7.3) * Math.sin(flickerT * 3.1);
+  scene.children.forEach(c => {
+    if (c.isLight && c.color && c.color.r > 0.8 && c.color.g < 0.5) {
+      c.intensity = c.userData._baseIntensity
+        ? c.userData._baseIntensity * flicker
+        : c.intensity;
+    }
+  });
+
+  checkExit();
+  checkBoardProximity();
+  renderer.render(scene, camera);
+  EvidenceSystem.update();
+}
+
+function checkBoardProximity() {
+  if (!window._boardGroup) return;
+  const bp = window._boardGroup.position;
+  const dx = camera.position.x - bp.x;
+  const dz = camera.position.z - bp.z;
+  const dist = Math.sqrt(dx*dx + dz*dz);
+  const hint = document.getElementById('boardHint');
+  if (hint) hint.style.display = dist < 280 ? 'block' : 'none';
+}
+
+// Store base intensities for flicker
+function storeBaseIntensities() {
+  scene.children.forEach(c => {
+    if (c.isLight) c.userData._baseIntensity = c.intensity;
+  });
+}
+
+
+
+
+// ─── EDIT SYSTEM (click + arrow keys, matches gothicroom) ────
+const STORAGE_KEY = 'library_layout_v2';
+let EDIT_MODE = false;
+let selectedObject = null;
+const editableObjects = [];
+const _ray = new THREE.Raycaster();
+const _mouse = new THREE.Vector2();
+
+function makeGroup(id, x, y, z, rotY) {
+  const g = new THREE.Group();
+  g.userData.editId = id;
+  g.position.set(x, y, z);
+  if (rotY) g.rotation.y = rotY;
+  editableObjects.push(g);
+  scene.add(g);
+  return g;
+}
+
+function showStatus(msg, ok=true) {
+  const el = document.getElementById('editStatus');
+  el.textContent = msg;
+  el.style.background = ok ? 'rgba(20,60,20,0.9)' : 'rgba(80,20,20,0.9)';
+  el.style.color = ok ? '#90e090' : '#f08080';
+  el.style.display = 'block';
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.style.display = 'none', 2500);
+}
+
+function updateEditUI() {
+  const btn = document.getElementById('editToggle');
+  btn.textContent = EDIT_MODE ? '✏️ Edit: ON' : 'M = Edit Mode';
+  btn.classList.toggle('on', EDIT_MODE);
+}
+
+function toggleEditMode() {
+  EDIT_MODE = !EDIT_MODE;
+  if (!EDIT_MODE) { selectedObject = null; document.getElementById('selInfo').style.display = 'none'; }
+  updateEditUI();
+}
+
+function saveLayout() {
+  const objects = editableObjects.map(o => ({
+    id: o.userData.editId,
+    position: { x: o.position.x, y: o.position.y, z: o.position.z },
+    rotation: o.rotation.y,
+  }));
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ objects }));
+  showStatus('✅ Layout saved');
+}
+
+function loadLayout() {
+  const json = localStorage.getItem(STORAGE_KEY);
+  if (!json) return;
+  try {
+    const d = JSON.parse(json);
+    for (const e of d.objects) {
+      const o = editableObjects.find(x => x.userData.editId === e.id);
+      if (!o) continue;
+      o.position.set(e.position.x, e.position.y, e.position.z);
+      o.rotation.y = e.rotation;
+    }
+  } catch(e) {}
+}
+
+function onEditPointerDown(event) {
+  if (!EDIT_MODE) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  _mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  _mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+  _ray.setFromCamera(_mouse, camera);
+  const meshes = [];
+  editableObjects.forEach(o => { o.traverse(ch => { if (ch.isMesh) meshes.push(ch); }); });
+  const hits = _ray.intersectObjects(meshes, false);
+  if (!hits.length) { selectedObject = null; document.getElementById('selInfo').style.display = 'none'; return; }
+  let obj = hits[0].object;
+  let cur = obj;
+  while (cur) { if (editableObjects.includes(cur)) { obj = cur; break; } cur = cur.parent; }
+  if (!editableObjects.includes(obj)) { selectedObject = null; document.getElementById('selInfo').style.display = 'none'; return; }
+  selectedObject = obj;
+  document.getElementById('selInfo').style.display = 'block';
+  document.getElementById('selInfo').textContent = '✏️ ' + obj.userData.editId + ' | Arrows=Move  R=Rotate  Ctrl+S=Save';
+  showStatus('Selected: ' + obj.userData.editId);
+}
+
+function initEditSystem() {
+  renderer.domElement.addEventListener('mousedown', onEditPointerDown);
+  loadLayout();
+}
+// init called after engine loads
+</script>
+<script src="help-system.js"></script>
+<script src="sound-system.js"></script>
+<script src="mystery-engine.js"></script>
+<script src="mystery-state.js"></script>
+<script src="mystery-ui.js"></script>
+<script src="evidence-system.js"></script>
+<script>
+(async () => {
+  await MysteryEngine.init();
+  let scenario = await MysteryState.load();
+  const isNew = !scenario;
+  if (isNew) { scenario = MysteryEngine.generate(); await MysteryState.save(scenario); }
+  window._scenario = scenario;
+  MysteryUI.init(scenario, isNew);
+  MysteryUI.setZone('library');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'library' });
+  const _sa=()=>{if(window.SoundSystem)SoundSystem.startAmbient();window.removeEventListener('keydown',_sa);window.removeEventListener('click',_sa);};
+  window.addEventListener('keydown',_sa);window.addEventListener('click',_sa);
+  initEditSystem();
+  initInterviewSystem();
+  HelpSystem.init('library');
+})();
+</script>
+</body>
+</html>

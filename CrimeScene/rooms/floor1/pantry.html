@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Pantry</title>
+<style>
+#exitFade { position: fixed; inset: 0; background: #000; opacity: 0; pointer-events: none; z-index: 9999; transition: opacity 0.6s ease; }
+#exitFade.show { opacity: 1; }
+#doorHint { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); padding: 10px 24px; background: rgba(0,0,0,0.85); color: #ffdd88; border-radius: 8px; font-size: 17px; display: none; z-index: 50; font-family: system-ui, Arial, sans-serif; }
+#instructionLine { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); padding: 8px 16px; font-size: 14px; color: #eee; background: rgba(0,0,0,0.6); border-radius: 6px; z-index: 30; pointer-events: none; white-space: nowrap; }
+body { margin: 0; overflow: hidden; background: #000; }
+canvas { display: block; }
+#fadeOverlay { position: fixed; inset: 0; background: #000; z-index: 9999; animation: fadeOut 0.8s ease forwards; }
+@keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+</style>
+</head>
+<body>
+<div id="exitFade"></div>
+<div id="doorHint">Press E — Return to Floor 1</div>
+<div id="instructionLine">W/↑ Forward &nbsp; S/↓ Back &nbsp; ←/→ Turn &nbsp; E = Exit</div>
+<div id="fadeOverlay"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script>
+const S = 0.5;
+const RW = 600*S, RD = 800*S, RH = 400*S;
+const WT = 20*S;
+
+let scene, camera, renderer;
+let moveForward=false, moveBackward=false, turnLeft=false, turnRight=false;
+let yaw = Math.PI, prevTime = performance.now();
+let nearExit = false, exitTriggered = false, nearFreezer = false, freezerTriggered = false;
+
+function init() {
+  setTimeout(()=>{ const f=document.getElementById('fadeOverlay'); if(f)f.remove(); }, 800);
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1a1008);
+  scene.fog = new THREE.Fog(0x1a1008, 200, 700);
+
+  camera = new THREE.PerspectiveCamera(72, innerWidth/innerHeight, 0.1, 2000);
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(innerWidth, innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // Lighting — warm pantry lantern glow
+  scene.add(new THREE.AmbientLight(0x2a1a08, 1.0));
+  const main = new THREE.PointLight(0xffcc66, 2.0, 500); main.position.set(0, RH-30*S, 0); scene.add(main);
+  const fill1 = new THREE.PointLight(0xff9933, 0.8, 300); fill1.position.set(-RW/3, RH*0.6, -RD/4); scene.add(fill1);
+  const fill2 = new THREE.PointLight(0xff9933, 0.8, 300); fill2.position.set( RW/3, RH*0.6,  RD/4); scene.add(fill2);
+
+  buildRoom();
+  buildDoors();
+  buildShelving();
+  buildContents();
+  buildExtras();
+
+  document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('keyup', onKeyUp);
+  window.addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+
+  const fromFloor1 = new URLSearchParams(window.location.search).get('from') === 'floor1';
+  const fromFreezer = new URLSearchParams(window.location.search).get('from') === 'freezer';
+  if(fromFreezer){
+    camera.position.set(0, 190*S, -RD/2 + 100*S); // just outside freezer door
+    yaw = Math.PI; // facing back into pantry
+  } else {
+    camera.position.set(0, 190*S, RD/2 - 100*S);
+    yaw = 0;
+  }
+  updateRotation();
+  animate();
+}
+
+// ── MATERIALS ──────────────────────────────────────────────
+const mat = {
+  wall:    ()=> new THREE.MeshLambertMaterial({color:0x4a3520}),
+  floor:   ()=> new THREE.MeshLambertMaterial({color:0x2a1e10}),
+  ceil:    ()=> new THREE.MeshLambertMaterial({color:0x3a2a18}),
+  shelf:   ()=> new THREE.MeshLambertMaterial({color:0x5c3a1e}),
+  wood:    ()=> new THREE.MeshLambertMaterial({color:0x3d2010}),
+  darkwood:()=> new THREE.MeshLambertMaterial({color:0x2a1508}),
+  brass:   ()=> new THREE.MeshLambertMaterial({color:0xb8860b}),
+  stone:   ()=> new THREE.MeshLambertMaterial({color:0x6a5a48}),
+  ceramic: ()=> new THREE.MeshLambertMaterial({color:0xd4c8a8}),
+  jar:     (c)=> new THREE.MeshLambertMaterial({color:c, transparent:true, opacity:0.85}),
+  label:   ()=> new THREE.MeshLambertMaterial({color:0xf0e8d0}),
+  herb:    ()=> new THREE.MeshLambertMaterial({color:0x3a5a1a}),
+  rope:    ()=> new THREE.MeshLambertMaterial({color:0x8a7040}),
+  basket:  ()=> new THREE.MeshLambertMaterial({color:0x8b6914}),
+  sack:    ()=> new THREE.MeshLambertMaterial({color:0x9a8050}),
+  barrel:  ()=> new THREE.MeshLambertMaterial({color:0x3e2209}),
+  iron:    ()=> new THREE.MeshLambertMaterial({color:0x3a3530}),
+};
+
+function box(w,h,d,m){ const mesh=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m); scene.add(mesh); return mesh; }
+function cyl(rt,rb,h,seg,m){ const mesh=new THREE.Mesh(new THREE.CylinderGeometry(rt,rb,h,seg),m); scene.add(mesh); return mesh; }
+
+// ── ROOM ───────────────────────────────────────────────────
+function buildRoom(){
+  // Floor — stone tiles
+  const tileA=new THREE.MeshLambertMaterial({color:0x3a2e20});
+  const tileB=new THREE.MeshLambertMaterial({color:0x2e2418});
+  const tSz=40*S;
+  for(let ix=0;ix<Math.ceil(RW/tSz);ix++)
+    for(let iz=0;iz<Math.ceil(RD/tSz);iz++){
+      const m=(ix+iz)%2===0?tileA:tileB;
+      const t=new THREE.Mesh(new THREE.BoxGeometry(tSz-1*S,2*S,tSz-1*S),m);
+      t.position.set(-RW/2+tSz*(ix+0.5),1*S,-RD/2+tSz*(iz+0.5)); scene.add(t);
+    }
+
+  // Ceiling with beams
+  const c=box(RW,8*S,RD,mat.ceil()); c.position.set(0,RH+4*S,0);
+  const beamMat=mat.darkwood();
+  [-RD/4, 0, RD/4].forEach(bz=>{
+    const beam=new THREE.Mesh(new THREE.BoxGeometry(RW,14*S,12*S),beamMat);
+    beam.position.set(0,RH-7*S,bz); scene.add(beam);
+  });
+
+  // Walls
+  // Back wall — split for freezer door opening (160*S wide centred)
+  const freezerDoorW=160*S, bWallZ=-RD/2+WT/2;
+  const bSideW=(RW-freezerDoorW)/2;
+  const bL=box(bSideW,RH,WT,mat.wall()); bL.position.set(-(freezerDoorW/2+bSideW/2),RH/2,bWallZ);
+  const bR=box(bSideW,RH,WT,mat.wall()); bR.position.set( freezerDoorW/2+bSideW/2, RH/2,bWallZ);
+  // No top piece — freezer door goes to ceiling
+  // Heavy freezer double doors (insulated, steel-look)
+  (()=>{
+    const steelMat=new THREE.MeshLambertMaterial({color:0x8899aa});
+    const darkSteel=new THREE.MeshLambertMaterial({color:0x445566});
+    const handleMat=new THREE.MeshLambertMaterial({color:0xccddee});
+    const gap=3*S, slabW=freezerDoorW/2-gap/2;
+    const wallZ=-RD/2+WT/2;
+    // Thick insulated frame
+    [-1,1].forEach(s=>{
+      const jamb=new THREE.Mesh(new THREE.BoxGeometry(12*S,RH,WT+6*S),darkSteel);
+      jamb.position.set(s*(freezerDoorW/2+6*S),RH/2,wallZ); scene.add(jamb);
+    });
+    // Two door slabs — thick and steel-panelled
+    [-1,1].forEach(s=>{
+      const cx=s*(gap/2+slabW/2);
+      const slab=new THREE.Mesh(new THREE.BoxGeometry(slabW,RH,14*S),steelMat);
+      slab.position.set(cx,RH/2,wallZ+3*S); scene.add(slab);
+      // Recessed panels
+      [[RH*0.75,RH*0.18],[RH*0.45,RH*0.38]].forEach(([py,ph])=>{
+        const panel=new THREE.Mesh(new THREE.BoxGeometry(slabW-14*S,ph,4*S),darkSteel);
+        panel.position.set(cx,py,wallZ+10*S); scene.add(panel);
+      });
+      // Handle bar
+      const hx=cx+s*(-slabW/2+10*S);
+      const bar=new THREE.Mesh(new THREE.BoxGeometry(6*S,60*S,6*S),handleMat);
+      bar.position.set(hx,RH*0.45,wallZ+14*S); scene.add(bar);
+      const hTop=new THREE.Mesh(new THREE.BoxGeometry(14*S,6*S,6*S),handleMat);
+      hTop.position.set(hx,RH*0.45+30*S,wallZ+14*S); scene.add(hTop);
+      const hBot=new THREE.Mesh(new THREE.BoxGeometry(14*S,6*S,6*S),handleMat);
+      hBot.position.set(hx,RH*0.45-30*S,wallZ+14*S); scene.add(hBot);
+      // Frost/ice rim around door edge
+      const frostMat=new THREE.MeshLambertMaterial({color:0xddeeff,transparent:true,opacity:0.5});
+      const frost=new THREE.Mesh(new THREE.BoxGeometry(slabW+2*S,RH+2*S,3*S),frostMat);
+      frost.position.set(cx,RH/2,wallZ-4*S); scene.add(frost);
+    });
+    // Gap strip
+    const gapStrip=new THREE.Mesh(new THREE.BoxGeometry(gap,RH,WT+8*S),new THREE.MeshLambertMaterial({color:0x223344}));
+    gapStrip.position.set(0,RH/2,wallZ+1*S); scene.add(gapStrip);
+    // "FREEZER" sign above door
+    const sign=new THREE.Mesh(new THREE.BoxGeometry(freezerDoorW-10*S,22*S,4*S),darkSteel);
+    sign.position.set(0,RH+11*S,wallZ+3*S); scene.add(sign);
+  })();
+  const leftW=box(WT,RH,RD,mat.wall()); leftW.position.set(-RW/2+WT/2,RH/2,0);
+  const rightW=box(WT,RH,RD,mat.wall()); rightW.position.set(RW/2-WT/2,RH/2,0);
+
+  // Front wall sides (door gap)
+  const doorW=240*S;
+  const fSideW=(RW-doorW)/2;
+  const fL=box(fSideW,RH,WT,mat.wall()); fL.position.set(-(doorW/2+fSideW/2),RH/2,RD/2-WT/2);
+  const fR=box(fSideW,RH,WT,mat.wall()); fR.position.set( doorW/2+fSideW/2, RH/2,RD/2-WT/2);
+
+  // Stone floor border
+  const border=mat.stone();
+  [[-RW/2+8*S,RD],[RW/2-8*S,RD]].forEach(([x,d])=>{
+    const b=new THREE.Mesh(new THREE.BoxGeometry(16*S,3*S,d),border); b.position.set(x,2*S,0); scene.add(b);
+  });
+  const bb=new THREE.Mesh(new THREE.BoxGeometry(RW,3*S,16*S),border); bb.position.set(0,2*S,-RD/2+8*S); scene.add(bb);
+
+  // Lantern on ceiling
+  const chain=cyl(1.5*S,1.5*S,40*S,6,mat.iron()); chain.position.set(0,RH-20*S,0);
+  const lanternBody=cyl(12*S,12*S,22*S,8,mat.iron()); lanternBody.position.set(0,RH-50*S,0);
+  const lanternGlow=new THREE.Mesh(new THREE.SphereGeometry(8*S,8,8),new THREE.MeshLambertMaterial({color:0xffee88,emissive:0x886622}));
+  lanternGlow.position.set(0,RH-50*S,0); scene.add(lanternGlow);
+  const lanternTop=cyl(14*S,10*S,10*S,8,mat.iron()); lanternTop.position.set(0,RH-38*S,0);
+}
+
+// ── DOUBLE DOORS ───────────────────────────────────────────
+function buildDoors(){
+  const doorW=240*S, doorH=RH;
+  const wallZ=RD/2-WT/2;
+  const gap=4*S;
+  const slabW=doorW/2-gap/2;
+  const woodMat=mat.wood();
+  const raisedMat=mat.darkwood();
+  const brassMat=mat.brass();
+  const frameMat=new THREE.MeshLambertMaterial({color:0x1e1008});
+
+  // Outer jambs
+  [-1,1].forEach(s=>{
+    const jamb=new THREE.Mesh(new THREE.BoxGeometry(10*S,doorH,WT+4*S),frameMat);
+    jamb.position.set(s*(doorW/2+5*S),doorH/2,wallZ); scene.add(jamb);
+  });
+
+  // Two door slabs
+  [-1,1].forEach(s=>{
+    const cx=s*(gap/2+slabW/2);
+    const slab=new THREE.Mesh(new THREE.BoxGeometry(slabW,doorH,8*S),woodMat);
+    slab.position.set(cx,doorH/2,wallZ+2*S); scene.add(slab);
+    // Raised panels (top, middle, bottom)
+    [[doorH*0.80,doorH*0.14],[doorH*0.52,doorH*0.20],[doorH*0.16,doorH*0.22]].forEach(([py,ph])=>{
+      const panel=new THREE.Mesh(new THREE.BoxGeometry(slabW-14*S,ph,5*S),raisedMat);
+      panel.position.set(cx,py,wallZ+6*S); scene.add(panel);
+    });
+    // Brass knob
+    const knobX=cx+s*(-slabW/2+9*S);
+    const knob=new THREE.Mesh(new THREE.SphereGeometry(5*S,10,10),brassMat);
+    knob.position.set(knobX,doorH*0.45,wallZ+8*S); scene.add(knob);
+    const plate=new THREE.Mesh(new THREE.CylinderGeometry(7*S,7*S,2*S,12),brassMat);
+    plate.rotation.x=Math.PI/2;
+    plate.position.set(knobX,doorH*0.45,wallZ+5*S); scene.add(plate);
+  });
+
+  // Dark gap strip
+  const gapStrip=new THREE.Mesh(new THREE.BoxGeometry(gap,doorH,WT+2*S),new THREE.MeshLambertMaterial({color:0x050200}));
+  gapStrip.position.set(0,doorH/2,wallZ+1*S); scene.add(gapStrip);
+}
+
+// ── SHELVING UNITS ─────────────────────────────────────────
+function buildShelving(){
+  const shelfMat=mat.shelf();
+  const supportMat=mat.darkwood();
+  const shelfD=55*S;
+  const shelfH=18*S;
+  const shelfLevels=[60*S,120*S,180*S,240*S,300*S];
+
+  // Left wall shelves — stop 120*S from back wall (freezer door area)
+  const sideShelfLen=RD-WT*2-120*S;
+  const sideShelfZ=RD/2-WT-sideShelfLen/2; // centred on front portion
+  [-sideShelfLen/2+20*S, 0, sideShelfLen/2-20*S].forEach(sz=>{
+    const unit=new THREE.Mesh(new THREE.BoxGeometry(8*S,RH-20*S,shelfD),supportMat);
+    unit.position.set(-RW/2+WT+4*S, (RH-20*S)/2+10*S, sideShelfZ+sz); scene.add(unit);
+  });
+  shelfLevels.forEach(sy=>{
+    const shelf=new THREE.Mesh(new THREE.BoxGeometry(shelfD,shelfH,sideShelfLen),shelfMat);
+    shelf.position.set(-RW/2+WT+shelfD/2,sy,sideShelfZ); scene.add(shelf);
+  });
+
+  // Right wall shelves — same
+  [-sideShelfLen/2+20*S, 0, sideShelfLen/2-20*S].forEach(sz=>{
+    const unit=new THREE.Mesh(new THREE.BoxGeometry(8*S,RH-20*S,shelfD),supportMat);
+    unit.position.set(RW/2-WT-4*S, (RH-20*S)/2+10*S, sideShelfZ+sz); scene.add(unit);
+  });
+  shelfLevels.forEach(sy=>{
+    const shelf=new THREE.Mesh(new THREE.BoxGeometry(shelfD,shelfH,sideShelfLen),shelfMat);
+    shelf.position.set(RW/2-WT-shelfD/2,sy,sideShelfZ); scene.add(shelf);
+  });
+}
+
+// ── JAR / CAN CONTENTS ─────────────────────────────────────
+function buildContents(){
+  const jarColors=[0x88aa44,0xdd6633,0xcc8822,0x558844,0xcc4422,0xaaaa33,0x44aa88,0x885533,0x996622,0x447766];
+  const shelfLevels=[60*S,120*S,180*S,240*S,300*S];
+  const shelfD=55*S;
+  const shelfH=18*S;
+  const ironMat=mat.iron();
+  const labelMat=mat.label();
+
+  // Side shelf jar placement — fill full depth of shelf with rows of jars
+  // Left shelf: jars packed along Z axis (full RD length)
+  shelfLevels.forEach((sy,si)=>{
+    const sideShelfLen2=RD-WT*2-120*S;
+    const sideShelfZ2=RD/2-WT-sideShelfLen2/2;
+    let z=sideShelfZ2-sideShelfLen2/2+4*S;
+    let col=0;
+    while(z < sideShelfZ2+sideShelfLen2/2-4*S){
+      const c=jarColors[(si*11+col)%jarColors.length];
+      const h=(col%3===0)?28*S:(col%3===1)?22*S:18*S;
+      const r=col%2===0?7*S:6*S;
+      const jar=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,10),new THREE.MeshLambertMaterial({color:c,transparent:true,opacity:0.82}));
+      jar.position.set(-RW/2+WT+shelfD/2, sy+shelfH/2+h/2, z); scene.add(jar);
+      const lbl=new THREE.Mesh(new THREE.BoxGeometry(r*1.4,h*0.35,1*S),labelMat);
+      lbl.position.set(-RW/2+WT+shelfD+0.5*S, sy+shelfH/2+h/2, z); scene.add(lbl);
+      const lid=new THREE.Mesh(new THREE.CylinderGeometry(r+0.5*S,r+0.5*S,2.5*S,10),ironMat);
+      lid.position.set(-RW/2+WT+shelfD/2, sy+shelfH/2+h+1.2*S, z); scene.add(lid);
+      z += (r*2+3*S);
+      col++;
+    }
+  });
+
+  // Right shelf: same treatment
+  shelfLevels.forEach((sy,si)=>{
+    const sideShelfLen3=RD-WT*2-120*S;
+    const sideShelfZ3=RD/2-WT-sideShelfLen3/2;
+    let z=sideShelfZ3-sideShelfLen3/2+4*S;
+    let col=0;
+    while(z < sideShelfZ3+sideShelfLen3/2-4*S){
+      const c=jarColors[(si*7+col+4)%jarColors.length];
+      const h=(col%3===0)?24*S:(col%3===1)?28*S:19*S;
+      const r=col%2===0?6*S:7*S;
+      const jar=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,10),new THREE.MeshLambertMaterial({color:c,transparent:true,opacity:0.82}));
+      jar.position.set(RW/2-WT-shelfD/2, sy+shelfH/2+h/2, z); scene.add(jar);
+      const lbl=new THREE.Mesh(new THREE.BoxGeometry(r*1.4,h*0.35,1*S),labelMat);
+      lbl.position.set(RW/2-WT-shelfD-0.5*S, sy+shelfH/2+h/2, z); scene.add(lbl);
+      const lid=new THREE.Mesh(new THREE.CylinderGeometry(r+0.5*S,r+0.5*S,2.5*S,10),ironMat);
+      lid.position.set(RW/2-WT-shelfD/2, sy+shelfH/2+h+1.2*S, z); scene.add(lid);
+      z += (r*2+3*S);
+      col++;
+    }
+  });
+}
+
+// ── EXTRAS — herbs, sacks, barrels ─────────────────────────
+function buildExtras(){
+  // Hanging herb bundles from beams
+  const herbMat=mat.herb();
+  const ropeMat=mat.rope();
+  [-80*S,0,80*S].forEach(px=>{
+    [-RD/4,RD/4].forEach(pz=>{
+      // Rope
+      const rope=new THREE.Mesh(new THREE.CylinderGeometry(1.5*S,1.5*S,18*S,6),ropeMat);
+      rope.position.set(px,RH-16*S,pz); scene.add(rope);
+      // Herb bundle
+      const bundle=new THREE.Mesh(new THREE.CylinderGeometry(6*S,3*S,20*S,8),herbMat);
+      bundle.position.set(px,RH-32*S,pz);
+      bundle.rotation.x=Math.PI; scene.add(bundle);
+      // Dried colour
+      const dried=new THREE.Mesh(new THREE.CylinderGeometry(4*S,2*S,18*S,8),new THREE.MeshLambertMaterial({color:0x6a8a30}));
+      dried.position.set(px,RH-33*S,pz);
+      dried.rotation.x=Math.PI; scene.add(dried);
+    });
+  });
+
+  // Barrels in corner
+  const barrelMat=mat.barrel();
+  const ironMat=mat.iron();
+  [[-RW/2+40*S,RD/2-50*S],[-RW/2+80*S,RD/2-50*S],[-RW/2+40*S,RD/2-100*S]].forEach(([bx,bz],i)=>{
+    const h=(i===1)?130*S:110*S;
+    const r=(i===1)?28*S:24*S;
+    const barrel=new THREE.Mesh(new THREE.CylinderGeometry(r,r*0.9,h,14),barrelMat);
+    barrel.position.set(bx,h/2,bz); scene.add(barrel);
+    // Hoops
+    [0.25,0.5,0.75].forEach(t=>{
+      const hoop=new THREE.Mesh(new THREE.TorusGeometry(r+1*S,2*S,6,20),ironMat);
+      hoop.rotation.x=Math.PI/2;
+      hoop.position.set(bx,h*t,bz); scene.add(hoop);
+    });
+    // Lid
+    const lid=new THREE.Mesh(new THREE.CylinderGeometry(r,r,5*S,14),barrelMat);
+    lid.position.set(bx,h+2.5*S,bz); scene.add(lid);
+  });
+}
+
+// ── EXIT ───────────────────────────────────────────────────
+const exitCooldown=(new URLSearchParams(window.location.search).get('from')==='floor1')?Date.now()+3000:0;
+const freezerCooldown=(new URLSearchParams(window.location.search).get('from')==='freezer')?Date.now()+3000:0;
+
+function checkExitDoor(){
+  if(!exitTriggered&&Date.now()>=exitCooldown)
+    nearExit=camera.position.x>-100*S&&camera.position.x<100*S&&camera.position.z>RD/2-90*S;
+  if(!freezerTriggered&&Date.now()>=freezerCooldown)
+    nearFreezer=camera.position.x>-90*S&&camera.position.x<90*S&&camera.position.z<-RD/2+110*S;
+  const hint=document.getElementById('doorHint');
+  if(hint){
+    if(nearFreezer&&!freezerTriggered){hint.style.display='block';hint.textContent='Press E — Enter Freezer';}
+    else if(nearExit&&!exitTriggered){hint.style.display='block';hint.textContent='Press E — Return to Floor 1';}
+    else hint.style.display='none';
+  }
+}
+
+function updateRotation(){ camera.rotation.order='YXZ'; camera.rotation.set(0,yaw,0); }
+
+function onKeyDown(e){
+  if(e.code==='KeyE'&&nearFreezer&&!freezerTriggered){
+    freezerTriggered=true;
+    document.getElementById('doorHint').style.display='none';
+    document.getElementById('exitFade').classList.add('show');
+    setTimeout(()=>window.location.href='freezer.html?from=pantry',600);
+    return;
+  }
+  if(e.code==='KeyE'&&nearExit&&!exitTriggered){
+    exitTriggered=true;
+    document.getElementById('doorHint').style.display='none';
+    document.getElementById('exitFade').classList.add('show');
+    setTimeout(()=>window.location.href='floor1.html?from=pantry',600);
+    return;
+  }
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=true;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=true;
+  if(e.code==='ArrowLeft')turnLeft=true;
+  if(e.code==='ArrowRight')turnRight=true;
+}
+function onKeyUp(e){
+  if(e.code==='KeyW'||e.code==='ArrowUp')moveForward=false;
+  if(e.code==='KeyS'||e.code==='ArrowDown')moveBackward=false;
+  if(e.code==='ArrowLeft')turnLeft=false;
+  if(e.code==='ArrowRight')turnRight=false;
+}
+
+function animate(){
+  requestAnimationFrame(animate);
+  const delta=(performance.now()-prevTime)/1000; prevTime=performance.now();
+  if(turnLeft)yaw+=2.2*delta; if(turnRight)yaw-=2.2*delta;
+  const mv=Number(moveForward)-Number(moveBackward);
+  const fwd=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  camera.position.x+=fwd.x*mv*90*delta;
+  camera.position.z+=fwd.z*mv*90*delta;
+  camera.position.x=Math.max(-RW/2+20*S,Math.min(RW/2-20*S,camera.position.x));
+  camera.position.z=Math.max(-RD/2+20*S,Math.min(RD/2-15*S,camera.position.z));
+  camera.position.y=190*S;
+  checkExitDoor(); updateRotation(); renderer.render(scene,camera);
+  EvidenceSystem.update();
+}
+
+// engine scripts loaded below
+</script>
+<script src="mystery-engine.js"></script>
+<script src="mystery-state.js"></script>
+<script src="mystery-ui.js"></script>
+<script src="evidence-system.js"></script>
+<script>
+(async () => {
+  await MysteryEngine.init();
+  let scenario = await MysteryState.load();
+  const isNew = !scenario;
+  if (isNew) { scenario = MysteryEngine.generate(); await MysteryState.save(scenario); }
+  window._scenario = scenario;
+  MysteryUI.init(scenario, isNew);
+  MysteryUI.setZone('pantry');
+  init();
+  EvidenceSystem.init({ camera, scene, renderer, zoneId: 'pantry' });
+})();
+</script>
+</body>
+</html>

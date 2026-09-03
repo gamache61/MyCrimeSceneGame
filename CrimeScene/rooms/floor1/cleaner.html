@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: Georgia, serif; background: #0d0b07; color: #e8d5b0; padding: 30px; margin: 0; }
+  h2 { color: #d4b96a; margin: 0 0 8px; font-size: 20px; }
+  p { color: #7a6a40; font-size: 14px; margin: 0 0 24px; }
+  .info { background: rgba(200,170,80,0.08); border: 1px solid rgba(200,170,80,0.2); border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; font-size: 14px; line-height: 1.8; }
+  .info span { color: #d4b96a; font-weight: bold; }
+  button { padding: 12px 28px; border-radius: 8px; font: 600 14px Georgia,serif; cursor: pointer; border: 1px solid rgba(200,170,80,0.4); background: rgba(200,170,80,0.12); color: #d4b96a; margin-right: 10px; margin-bottom: 10px; }
+  button:hover { background: rgba(200,170,80,0.22); }
+  button.danger { border-color: rgba(200,60,60,0.5); background: rgba(200,60,60,0.12); color: #ff8888; }
+  button.danger:hover { background: rgba(200,60,60,0.25); }
+  .log { margin-top: 20px; background: rgba(0,0,0,0.4); border-radius: 8px; padding: 14px 18px; font: 13px/1.8 monospace; color: #90c090; max-height: 400px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h2>🧹 Crowsnest Castle — Storage Cleaner</h2>
+<p>Scans all localStorage keys, keeps the 5 most recent snapshot per floor, deletes the rest.</p>
+<div class="info" id="info">Click Scan to begin.</div>
+<br>
+<button onclick="scan()">🔍 Scan</button>
+<button class="danger" onclick="clean()">🗑 Clean — Keep 5 Per Floor</button>
+<button class="danger" onclick="nukeAll()">☢ Wipe ALL Storage</button>
+<button onclick="backupScore()">💾 Backup Best Score</button>
+<button onclick="document.getElementById('restoreInput').click()">📂 Restore Best Score</button>
+<input type="file" id="restoreInput" accept=".json" style="display:none" onchange="restoreScore(this)">
+<div class="log" id="log"></div>
+
+<script>
+function backupScore() {
+  const best = localStorage.getItem('crowsnest_best_v1');
+  const last = localStorage.getItem('crowsnest_score_v1');
+  if (!best && !last) { log('No score data found to backup.'); return; }
+  const data = { crowsnest_best_v1: best ? JSON.parse(best) : null, crowsnest_score_v1: last ? JSON.parse(last) : null, exported: new Date().toISOString() };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'crowsnest_score_backup.json';
+  a.click();
+  log('✅ Score backup downloaded.');
+}
+
+function restoreScore(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (data.crowsnest_best_v1) localStorage.setItem('crowsnest_best_v1', JSON.stringify(data.crowsnest_best_v1));
+      if (data.crowsnest_score_v1) localStorage.setItem('crowsnest_score_v1', JSON.stringify(data.crowsnest_score_v1));
+      log('✅ Score restored from backup.');
+      scan();
+    } catch(err) {
+      log('❌ Failed to restore — invalid file.');
+    }
+    input.value = '';
+  };
+  reader.readAsText(file);
+}
+
+
+function kb() {
+  let t = 0;
+  for (let i = 0; i < localStorage.length; i++) t += (localStorage.getItem(localStorage.key(i))||'').length;
+  return (t/1024).toFixed(1);
+}
+function log(msg) {
+  document.getElementById('log').innerHTML += msg + '<br>';
+}
+
+function scan() {
+  document.getElementById('log').innerHTML = '';
+  const total = localStorage.length;
+  const used = kb();
+  // Group snapshot keys by floor prefix
+  const groups = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k) continue;
+    const m = k.match(/^([a-z0-9_]+)_snapshot_/);
+    if (m) {
+      const floor = m[1];
+      if (!groups[floor]) groups[floor] = [];
+      groups[floor].push(k);
+    }
+  }
+  document.getElementById('info').innerHTML =
+    `Keys: <span>${total}</span> &nbsp; Used: <span>${used} KB / ~5120 KB</span><br>` +
+    Object.entries(groups).map(([f,ks]) => `${f}: <span>${ks.length} snapshots</span>`).join('<br>');
+  log('Scan complete.');
+}
+
+function clean() {
+  document.getElementById('log').innerHTML = '';
+  let deleted = 0;
+
+  // Collect all snapshot keys grouped by floor
+  const groups = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (!k) continue;
+    // Match any key that looks like a snapshot (has _snapshot_ and a timestamp)
+    const m = k.match(/^([a-z0-9_]+)_snapshot_(\d{4}-\d{2}-\d{2}.+)$/);
+    if (m) {
+      const floor = m[1];
+      if (!groups[floor]) groups[floor] = [];
+      groups[floor].push(k);
+    }
+  }
+
+  // For each floor, sort newest first and delete beyond 5
+  Object.entries(groups).forEach(([floor, keys]) => {
+    // Sort descending (newest first — key contains timestamp)
+    keys.sort().reverse();
+    const toDelete = keys.slice(5);
+    toDelete.forEach(k => {
+      try { localStorage.removeItem(k); deleted++; } catch(e) {}
+    });
+    // Update the index to only contain the kept keys
+    const kept = keys.slice(0, 5);
+    localStorage.setItem(floor + '_snapshot_index', JSON.stringify(kept));
+    log(`${floor}: kept ${kept.length}, deleted ${toDelete.length}`);
+  });
+
+  log(`<br>✅ Deleted ${deleted} keys. Storage now: ${kb()} KB`);
+  scan();
+}
+
+function nukeAll() {
+  if (!confirm('This will wipe ALL localStorage including all saves. Are you sure?')) return;
+  localStorage.clear();
+  log('☢ All localStorage cleared.');
+  scan();
+}
+
+scan();
+</script>
+</body>
+</html>

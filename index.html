@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crowsnest Castle</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#1a0e06">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    color: #e8dfc8;
+    font-family: Georgia, serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  #splash {
+    text-align: center;
+    animation: fadeIn 2s ease forwards;
+  }
+
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
+
+  .castle-icon {
+    width: 180px;
+    height: 180px;
+    margin: 0 auto 32px;
+    filter: drop-shadow(0 0 20px rgba(184,134,11,0.4));
+  }
+
+  h1 {
+    font-size: 42px;
+    color: #b8860b;
+    letter-spacing: 4px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    text-shadow: 0 0 30px rgba(184,134,11,0.5);
+  }
+
+  .subtitle {
+    font-size: 14px;
+    color: #7a5a2a;
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    margin-bottom: 60px;
+  }
+
+  #enterBtn {
+    padding: 16px 48px;
+    background: transparent;
+    border: 1px solid rgba(184,134,11,0.6);
+    color: #b8860b;
+    font-family: Georgia, serif;
+    font-size: 16px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.3s ease;
+  }
+
+  #enterBtn:hover {
+    background: rgba(184,134,11,0.1);
+    border-color: #b8860b;
+    box-shadow: 0 0 20px rgba(184,134,11,0.2);
+  }
+
+  #loading {
+    display: none;
+    font-size: 13px;
+    color: #7a5a2a;
+    letter-spacing: 2px;
+    margin-top: 24px;
+    animation: pulse 1.5s ease infinite;
+  }
+
+  @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+  #offlineNote {
+    position: fixed;
+    bottom: 20px;
+    font-size: 11px;
+    color: #3a2a1a;
+    letter-spacing: 1px;
+  }
+
+  #handbook {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: #080603;
+    overflow-y: auto;
+    padding: 40px 20px 60px;
+    animation: fadeIn 0.8s ease forwards;
+  }
+  #handbookInner { max-width: 680px; margin: 0 auto; }
+  #handbook h2 { font-size: 11px; letter-spacing: 4px; text-transform: uppercase; color: #7a5a2a; margin-bottom: 6px; }
+  #handbook h3 { font-size: 26px; color: #b8860b; letter-spacing: 2px; margin-bottom: 32px; text-shadow: 0 0 20px rgba(184,134,11,0.3); }
+  .hb-section { border-left: 2px solid rgba(184,134,11,0.3); padding: 0 0 28px 24px; margin-bottom: 4px; }
+  .hb-section h4 { font-size: 12px; letter-spacing: 3px; text-transform: uppercase; color: #b8860b; margin-bottom: 10px; }
+  .hb-section p, .hb-section li { font-size: 14px; color: #a09070; line-height: 1.9; }
+  .hb-section ul { list-style: none; padding: 0; margin: 0; }
+  .hb-section li { padding-left: 16px; position: relative; }
+  .hb-section li::before { content: "—"; position: absolute; left: 0; color: #5a3a1a; }
+  #handbookContinue { display: block; margin: 40px auto 0; padding: 14px 48px; background: transparent; border: 1px solid rgba(184,134,11,0.6); color: #b8860b; font-family: Georgia, serif; font-size: 15px; letter-spacing: 3px; text-transform: uppercase; cursor: pointer; border-radius: 2px; transition: all 0.3s ease; }
+  #handbookContinue:hover { background: rgba(184,134,11,0.1); box-shadow: 0 0 20px rgba(184,134,11,0.2); }
+
+  /* Menu */
+  #menu {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: #080603;
+    overflow-y: auto;
+    padding: 60px 20px;
+    animation: fadeIn 0.8s ease forwards;
+  }
+  #menuInner { max-width: 520px; margin: 0 auto; text-align: center; }
+  #menu h2 { font-size: 11px; letter-spacing: 4px; text-transform: uppercase; color: #7a5a2a; margin-bottom: 6px; }
+  #menu h3 { font-size: 30px; color: #b8860b; letter-spacing: 2px; margin-bottom: 48px; text-shadow: 0 0 20px rgba(184,134,11,0.3); }
+  .menu-btn {
+    display: block; width: 100%; max-width: 360px; margin: 0 auto 16px;
+    padding: 18px 32px; background: transparent;
+    border: 1px solid rgba(184,134,11,0.4); color: #d4b96a;
+    font-family: Georgia, serif; font-size: 15px; letter-spacing: 2px;
+    text-transform: uppercase; cursor: pointer; border-radius: 2px;
+    transition: all 0.3s ease; text-align: center;
+  }
+  .menu-btn:hover { background: rgba(184,134,11,0.1); border-color: #b8860b; box-shadow: 0 0 20px rgba(184,134,11,0.15); }
+  .menu-btn.primary { border-color: rgba(184,134,11,0.8); color: #b8860b; font-size: 17px; margin-bottom: 32px; }
+  .menu-btn-sub { font-size: 11px; color: #5a4a2a; letter-spacing: 1px; display: block; margin-top: 4px; text-transform: none; }
+
+  /* How to Play */
+  #howtoplay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: #080603;
+    overflow-y: auto;
+    padding: 40px 20px 60px;
+    animation: fadeIn 0.8s ease forwards;
+  }
+  #howtoplayInner { max-width: 680px; margin: 0 auto; }
+  #howtoplay h2 { font-size: 11px; letter-spacing: 4px; text-transform: uppercase; color: #7a5a2a; margin-bottom: 6px; }
+  #howtoplay h3 { font-size: 26px; color: #b8860b; letter-spacing: 2px; margin-bottom: 32px; text-shadow: 0 0 20px rgba(184,134,11,0.3); }
+  .htp-section { border-left: 2px solid rgba(184,134,11,0.3); padding: 0 0 28px 24px; margin-bottom: 4px; }
+  .htp-section h4 { font-size: 12px; letter-spacing: 3px; text-transform: uppercase; color: #b8860b; margin-bottom: 10px; }
+  .htp-section p, .htp-section li { font-size: 14px; color: #a09070; line-height: 1.9; }
+  .htp-section ul { list-style: none; padding: 0; margin: 0; }
+  .htp-section li { padding-left: 16px; position: relative; }
+  .htp-section li::before { content: "—"; position: absolute; left: 0; color: #5a3a1a; }
+  .back-btn { display: block; margin: 40px auto 0; padding: 12px 36px; background: transparent; border: 1px solid rgba(184,134,11,0.4); color: #7a5a2a; font-family: Georgia, serif; font-size: 13px; letter-spacing: 2px; text-transform: uppercase; cursor: pointer; border-radius: 2px; transition: all 0.3s ease; }
+  .back-btn:hover { background: rgba(184,134,11,0.08); color: #b8860b; }
+
+  /* Starfield */
+  #stars {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="stars"></canvas>
+
+<div id="splash">
+  <img src="icons/icon-512.png" class="castle-icon" alt="Crowsnest Castle" onerror="this.style.display='none'">
+  <h1>Crowsnest Castle</h1>
+  <div class="subtitle">A Murder Mystery</div>
+  <button id="enterBtn">Enter the Castle</button>
+  <div id="loading">Loading...</div>
+</div>
+
+<div id="offlineNote">Playable offline</div>
+
+<div id="menu">
+  <div id="menuInner">
+    <h2>Crowsnest Castle</h2>
+    <h3>A Murder Mystery</h3>
+    <button class="menu-btn primary" id="menuEnterBtn">▶ Enter the Castle</button>
+    <button class="menu-btn" id="menuHowBtn">How to Play<span class="menu-btn-sub">Controls, scoring &amp; objectives</span></button>
+    <button class="menu-btn" id="menuHandbookBtn">Detective's Handbook<span class="menu-btn-sub">Investigative techniques &amp; theory</span></button>
+  </div>
+</div>
+
+<div id="howtoplay">
+  <div id="howtoplayInner">
+    <h2>Crowsnest Castle</h2>
+    <h3>How to Play</h3>
+
+    <div class="htp-section">
+      <h4>Movement</h4>
+      <ul>
+        <li><strong style="color:#c8a060;">W / S or ↑ / ↓</strong> — Move forward &amp; back</li>
+        <li><strong style="color:#c8a060;">← / →</strong> — Slide left &amp; right</li>
+        <li><strong style="color:#c8a060;">Mouse</strong> — Look around</li>
+        <li><strong style="color:#c8a060;">G</strong> — Toggle compass</li>
+      </ul>
+    </div>
+
+    <div class="htp-section">
+      <h4>Investigating</h4>
+      <ul>
+        <li><strong style="color:#c8a060;">E</strong> — Enter rooms &amp; use elevators</li>
+        <li><strong style="color:#c8a060;">F</strong> — Pick up evidence when the hint appears</li>
+        <li>Golden orbs mark evidence locations — approach to trigger the hint</li>
+        <li>Open <strong style="color:#c8a060;">Bull's Notebook</strong> to review clues, suspects, and your notes</li>
+      </ul>
+    </div>
+
+    <div class="htp-section">
+      <h4>Making an Accusation</h4>
+      <ul>
+        <li>Collect at least <strong style="color:#c8a060;">15 clues</strong> before you can accuse</li>
+        <li>Open Bull's Notebook → <strong style="color:#c8a060;">Accuse</strong> tab</li>
+        <li>Name the suspect, the room, and the weapon</li>
+        <li>Wrong accusations are penalised — be sure before you commit</li>
+      </ul>
+    </div>
+
+    <div class="htp-section">
+      <h4>Scoring</h4>
+      <p>Scoring can be toggled on or off in Bull's Notebook → Notes tab.</p>
+      <ul>
+        <li>Start with <strong style="color:#c8a060;">1,000 points</strong></li>
+        <li>−1 point per 10 seconds elapsed</li>
+        <li>−200 points per wrong accusation</li>
+        <li>+50 points for each clue <em>under</em> the 15 minimum when you solve</li>
+        <li>−25 points for each clue <em>over</em> the 15 minimum when you solve</li>
+      </ul>
+    </div>
+
+    <button class="back-btn" id="howtoplayBack">← Back</button>
+  </div>
+</div>
+
+<div id="handbook">
+  <div id="handbookInner">
+    <h2>Crowsnest Castle</h2>
+    <h3>The Detective's Handbook</h3>
+
+    <div class="hb-section">
+      <h4>The Three Pillars of Every Case</h4>
+      <p>Every murder investigation rests on three questions. Your suspect must satisfy all three.</p>
+      <ul>
+        <li><strong style="color:#c8a060;">Motive</strong> — Why would they want the victim dead? Look for jealousy, greed, revenge, or fear.</li>
+        <li><strong style="color:#c8a060;">Means</strong> — Did they have access to the weapon or the physical ability to commit the act?</li>
+        <li><strong style="color:#c8a060;">Opportunity</strong> — Could they have been in the right place at the right time? An alibi eliminates opportunity.</li>
+      </ul>
+    </div>
+
+    <div class="hb-section">
+      <h4>Reading Witness Statements</h4>
+      <p>Witnesses lie, misremember, and omit. Ask yourself:</p>
+      <ul>
+        <li>Does this person have a reason to protect someone?</li>
+        <li>Does their account match the physical evidence?</li>
+        <li>Are they certain of the time, or guessing?</li>
+        <li>Were they alone, or can their presence be corroborated?</li>
+      </ul>
+    </div>
+
+    <div class="hb-section">
+      <h4>Establishing a Timeline</h4>
+      <p>The time of death is your anchor. Work outward from it. Where was each person one hour before? During? After? Gaps in a suspect's timeline are as telling as contradictions.</p>
+      <p>A strong alibi places someone far from the crime room at the exact time of death — with a witness or document to prove it.</p>
+    </div>
+
+    <div class="hb-section">
+      <h4>Physical Evidence</h4>
+      <p>Objects don't lie — but they can mislead. A weapon found in a room proves it was there, not who put it there. Ask:</p>
+      <ul>
+        <li>Who had access to this location?</li>
+        <li>Could this evidence have been planted?</li>
+        <li>Does it point to the same suspect as the witness testimony?</li>
+      </ul>
+    </div>
+
+    <div class="hb-section">
+      <h4>Cross-Referencing Clues</h4>
+      <p>A single clue is a lead. Two clues pointing the same direction is a pattern. Three is a case. Never accuse on one piece of evidence alone — look for convergence across witness accounts, documents, and physical finds.</p>
+    </div>
+
+    <div class="hb-section">
+      <h4>When You're Ready to Accuse</h4>
+      <p>Open Bull's Notebook and go to the Accuse tab. You'll need to name the suspect, the room, and the weapon. You must have gathered enough evidence first. Choose carefully — wrong accusations are noted.</p>
+    </div>
+
+    <button id="handbookContinue">Enter the Castle</button>
+  </div>
+</div>
+
+<script>
+  // Register service worker
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      console.log('[SW] Registered:', reg.scope);
+    }).catch(err => {
+      console.warn('[SW] Registration failed:', err);
+    });
+  }
+
+  // Starfield background
+  const canvas = document.getElementById('stars');
+  const ctx = canvas.getContext('2d');
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  window.addEventListener('resize', () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    drawStars();
+  });
+
+  const stars = Array.from({ length: 180 }, () => ({
+    x: Math.random(), y: Math.random(),
+    r: Math.random() * 1.5 + 0.3,
+    a: Math.random(),
+    s: Math.random() * 0.003 + 0.001
+  }));
+
+  function drawStars() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    stars.forEach(s => {
+      s.a += s.s;
+      const alpha = 0.3 + 0.5 * Math.abs(Math.sin(s.a));
+      ctx.beginPath();
+      ctx.arc(s.x * canvas.width, s.y * canvas.height, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255, 245, 200, ${alpha})`;
+      ctx.fill();
+    });
+    requestAnimationFrame(drawStars);
+  }
+  drawStars();
+
+  function showScreen(id) {
+    ['splash','menu','howtoplay','handbook'].forEach(s => {
+      const el = document.getElementById(s);
+      if (el) { el.style.display = 'none'; el.style.animation = ''; }
+    });
+    const target = document.getElementById(id);
+    if (target) { target.style.display = 'block'; target.style.animation = 'fadeIn 0.6s ease forwards'; }
+  }
+
+  function fadeToScreen(id) {
+    const current = ['splash','menu','howtoplay','handbook'].find(s => {
+      const el = document.getElementById(s);
+      return el && el.style.display !== 'none' && el.style.display !== '';
+    }) || 'splash';
+    const el = document.getElementById(current);
+    if (el) el.style.animation = 'fadeOut 0.4s ease forwards';
+    setTimeout(() => showScreen(id), 400);
+  }
+
+  document.getElementById('enterBtn').addEventListener('click', () => fadeToScreen('menu'));
+  document.getElementById('menuEnterBtn').addEventListener('click', () => {
+    document.getElementById('menu').style.animation = 'fadeOut 0.6s ease forwards';
+    setTimeout(() => { window.location.href = 'Rooms/floor1/floor1.html'; }, 600);
+  });
+  document.getElementById('menuHowBtn').addEventListener('click', () => fadeToScreen('howtoplay'));
+  document.getElementById('menuHandbookBtn').addEventListener('click', () => fadeToScreen('handbook'));
+  document.getElementById('howtoplayBack').addEventListener('click', () => fadeToScreen('menu'));
+  document.getElementById('handbookContinue').addEventListener('click', () => fadeToScreen('menu'));
+</script>
+</body>
+</html>

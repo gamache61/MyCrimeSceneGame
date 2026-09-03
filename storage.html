@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Storage Monitor — Crowsnest Castle</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600&family=Crimson+Text:ital,wght@0,400;0,600;1,400&display=swap');
+
+  :root {
+    --bg: #0d0b08;
+    --panel: #1a1610;
+    --border: #3a2e1e;
+    --gold: #c8a84b;
+    --gold-dim: #7a6030;
+    --red: #c0392b;
+    --green: #2ecc71;
+    --amber: #e67e22;
+    --text: #d4c9a8;
+    --text-dim: #7a6e58;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Crimson Text', Georgia, serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 20px;
+    background-image: radial-gradient(ellipse at 50% 0%, #2a1e0a 0%, #0d0b08 60%);
+  }
+
+  h1 {
+    font-family: 'Cinzel', serif;
+    font-size: 22px;
+    letter-spacing: 3px;
+    color: var(--gold);
+    text-align: center;
+    margin-bottom: 4px;
+    text-shadow: 0 0 20px rgba(200,168,75,0.3);
+  }
+
+  .subtitle {
+    font-size: 13px;
+    color: var(--text-dim);
+    text-align: center;
+    font-style: italic;
+    margin-bottom: 32px;
+    letter-spacing: 1px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 24px;
+    width: 100%;
+    max-width: 560px;
+    margin-bottom: 16px;
+  }
+
+  .panel-title {
+    font-family: 'Cinzel', serif;
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: var(--gold-dim);
+    text-transform: uppercase;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+  }
+
+  /* Usage bar */
+  .usage-bar-wrap {
+    background: #0a0806;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    height: 18px;
+    overflow: hidden;
+    margin-bottom: 10px;
+    position: relative;
+  }
+  .usage-bar {
+    height: 100%;
+    width: 0%;
+    transition: width 0.6s ease, background 0.4s;
+    background: var(--green);
+  }
+  .usage-bar.warn { background: var(--amber); }
+  .usage-bar.danger { background: var(--red); }
+
+  .usage-labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 16px;
+  }
+  .usage-labels span.highlight { color: var(--text); font-weight: 600; }
+
+  /* Warning box */
+  .warning-box {
+    border: 1px solid var(--red);
+    background: rgba(192,57,43,0.12);
+    border-radius: 3px;
+    padding: 12px 16px;
+    font-size: 14px;
+    color: #e07070;
+    display: none;
+    margin-bottom: 12px;
+    line-height: 1.6;
+  }
+  .warning-box.show { display: block; }
+  .warning-box strong { color: #ff9090; }
+
+  .ok-box {
+    border: 1px solid #2a5a3a;
+    background: rgba(46,204,113,0.08);
+    border-radius: 3px;
+    padding: 12px 16px;
+    font-size: 14px;
+    color: #70c090;
+    margin-bottom: 12px;
+    line-height: 1.6;
+  }
+
+  /* Snapshot list */
+  .snap-list {
+    list-style: none;
+    font-size: 13px;
+  }
+  .snap-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 0;
+    border-bottom: 1px solid #1e1a12;
+    color: var(--text-dim);
+  }
+  .snap-list li:last-child { border-bottom: none; }
+  .snap-list li .snap-key { color: var(--text); font-size: 12px; font-family: monospace; }
+  .snap-list li .snap-size { color: var(--gold-dim); font-size: 11px; }
+  .snap-list .empty { color: var(--text-dim); font-style: italic; font-size: 13px; padding: 8px 0; }
+
+  /* Buttons */
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+  button {
+    font-family: 'Cinzel', serif;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    padding: 8px 16px;
+    border-radius: 2px;
+    border: 1px solid var(--border);
+    background: #1e1a12;
+    color: var(--text);
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  button:hover { border-color: var(--gold-dim); color: var(--gold); }
+  button.danger-btn { border-color: #5a1a1a; color: #c07070; }
+  button.danger-btn:hover { border-color: var(--red); color: #ff8080; }
+
+  .refresh-note {
+    font-size: 12px;
+    color: var(--text-dim);
+    text-align: center;
+    font-style: italic;
+    margin-top: 20px;
+  }
+
+  .clean-result {
+    margin-top: 12px;
+    font-size: 13px;
+    color: #70c090;
+    display: none;
+    font-style: italic;
+  }
+
+  /* Ornament */
+  .ornament {
+    color: var(--gold-dim);
+    font-size: 18px;
+    text-align: center;
+    margin-bottom: 20px;
+    letter-spacing: 8px;
+  }
+</style>
+</head>
+<body>
+
+<h1>CROWSNEST CASTLE</h1>
+<div class="subtitle">Local Storage Monitor</div>
+<div class="ornament">⬥ ⬦ ⬥</div>
+
+<div class="panel">
+  <div class="panel-title">Storage Usage</div>
+  <div class="usage-bar-wrap"><div class="usage-bar" id="usageBar"></div></div>
+  <div class="usage-labels">
+    <span>Used: <span class="highlight" id="usedLabel">—</span></span>
+    <span>Available: <span class="highlight" id="availLabel">~5 MB</span></span>
+    <span>Snapshots: <span class="highlight" id="snapCount">—</span></span>
+  </div>
+
+  <div class="warning-box" id="warningBox">
+    <strong>⚠ Storage is getting full.</strong><br>
+    Do <strong>not</strong> clear all of localStorage — you will lose your room layouts.<br>
+    Instead, use the <strong>☰ Menu → Clear Layout</strong> inside a specific room to remove only that room's oldest snapshots.
+  </div>
+
+  <div class="ok-box" id="okBox">
+    ✓ Storage looks healthy. Your room layouts are safe.
+  </div>
+
+  <div class="btn-row">
+    <button onclick="refresh()">↻ Refresh</button>
+    <button class="danger-btn" onclick="cleanUp()">⚑ Clean Up — Keep 5 Newest</button>
+  </div>
+  <div class="clean-result" id="cleanResult"></div>
+</div>
+
+<div class="panel">
+  <div class="panel-title">Room Snapshots Found</div>
+  <ul class="snap-list" id="snapList"></ul>
+</div>
+
+<div class="refresh-note">Keep this page open while working — it updates every 10 seconds.</div>
+
+<script>
+const WARN_PERCENT = 70;
+const DANGER_PERCENT = 90;
+
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
+  return (b/1024/1024).toFixed(2) + ' MB';
+}
+
+function getStorageUsed() {
+  let total = 0;
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    const val = localStorage.getItem(key) || '';
+    total += key.length + val.length;
+  }
+  return total * 2; // UTF-16 = 2 bytes per char
+}
+
+function getSnapshots() {
+  const snaps = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && (key.includes('_snap_') || key.includes('_layout'))) {
+      const val = localStorage.getItem(key) || '';
+      snaps.push({ key, size: (key.length + val.length) * 2 });
+    }
+  }
+  snaps.sort((a,b) => b.size - a.size);
+  return snaps;
+}
+
+function refresh() {
+  const used = getStorageUsed();
+  const maxBytes = 5 * 1024 * 1024; // ~5MB typical limit
+  const pct = Math.min((used / maxBytes) * 100, 100);
+
+  const bar = document.getElementById('usageBar');
+  bar.style.width = pct.toFixed(1) + '%';
+  bar.className = 'usage-bar' + (pct >= DANGER_PERCENT ? ' danger' : pct >= WARN_PERCENT ? ' warn' : '');
+
+  document.getElementById('usedLabel').textContent = formatBytes(used) + ' (' + pct.toFixed(1) + '%)';
+
+  const snaps = getSnapshots();
+  document.getElementById('snapCount').textContent = snaps.length;
+
+  const warn = document.getElementById('warningBox');
+  const ok = document.getElementById('okBox');
+  if (pct >= WARN_PERCENT) {
+    warn.classList.add('show');
+    ok.style.display = 'none';
+  } else {
+    warn.classList.remove('show');
+    ok.style.display = 'block';
+  }
+
+  const list = document.getElementById('snapList');
+  if (snaps.length === 0) {
+    list.innerHTML = '<li><span class="empty">No room snapshots found in storage.</span></li>';
+  } else {
+    list.innerHTML = snaps.map(s =>
+      `<li><span class="snap-key">${s.key}</span><span class="snap-size">${formatBytes(s.size)}</span></li>`
+    ).join('');
+  }
+}
+
+function cleanUp() {
+  // Group snapshots by their index key (each room has its own index)
+  const indexKeys = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key && key.endsWith('_snap_index')) {
+      indexKeys[key] = JSON.parse(localStorage.getItem(key) || '[]');
+    }
+  }
+
+  let deleted = 0;
+
+  // For each room's snapshot index, keep only the 5 newest, delete the rest
+  for (const [idxKey, list] of Object.entries(indexKeys)) {
+    if (list.length > 5) {
+      const toDelete = list.slice(5); // oldest are at the end
+      toDelete.forEach(k => { localStorage.removeItem(k); deleted++; });
+      const kept = list.slice(0, 5);
+      localStorage.setItem(idxKey, JSON.stringify(kept));
+    }
+  }
+
+  // Also clean up any orphaned snap keys not in any index
+  const allIndexed = new Set();
+  for (const list of Object.values(indexKeys)) list.forEach(k => allIndexed.add(k));
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const key = localStorage.key(i);
+    if (key && key.includes('_snap_') && !key.endsWith('_snap_index') && !key.endsWith('_snap_seq') && !allIndexed.has(key)) {
+      localStorage.removeItem(key);
+      deleted++;
+    }
+  }
+
+  const result = document.getElementById('cleanResult');
+  result.style.display = 'block';
+  result.textContent = deleted > 0
+    ? `✓ Cleaned up — removed ${deleted} old snapshot${deleted>1?'s':''}, kept 5 newest per room.`
+    : '✓ Nothing to clean — storage is already tidy.';
+  setTimeout(() => { result.style.display = 'none'; }, 4000);
+  refresh();
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

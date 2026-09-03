@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#0a0604"/>
+  <!-- Castle silhouette -->
+  <rect x="156" y="200" width="200" height="220" fill="#2a1a0a"/>
+  <!-- Battlements top -->
+  <rect x="156" y="180" width="30" height="30" fill="#2a1a0a"/>
+  <rect x="206" y="180" width="30" height="30" fill="#2a1a0a"/>
+  <rect x="256" y="180" width="30" height="30" fill="#2a1a0a"/>
+  <rect x="306" y="180" width="30" height="30" fill="#2a1a0a"/>
+  <rect x="326" y="180" width="30" height="30" fill="#2a1a0a"/>
+  <!-- Left tower -->
+  <rect x="110" y="160" width="70" height="260" fill="#1a0e06"/>
+  <rect x="110" y="140" width="20" height="25" fill="#1a0e06"/>
+  <rect x="140" y="140" width="20" height="25" fill="#1a0e06"/>
+  <rect x="160" y="140" width="20" height="25" fill="#1a0e06"/>
+  <!-- Right tower -->
+  <rect x="332" y="160" width="70" height="260" fill="#1a0e06"/>
+  <rect x="332" y="140" width="20" height="25" fill="#1a0e06"/>
+  <rect x="352" y="140" width="20" height="25" fill="#1a0e06"/>
+  <rect x="382" y="140" width="20" height="25" fill="#1a0e06"/>
+  <!-- Gate arch -->
+  <rect x="216" y="320" width="80" height="100" fill="#060402"/>
+  <ellipse cx="256" cy="320" rx="40" ry="20" fill="#060402"/>
+  <!-- Windows -->
+  <rect x="170" y="230" width="24" height="36" fill="#b8860b" opacity="0.7"/>
+  <rect x="216" y="230" width="24" height="36" fill="#b8860b" opacity="0.5"/>
+  <rect x="272" y="230" width="24" height="36" fill="#b8860b" opacity="0.7"/>
+  <rect x="318" y="230" width="24" height="36" fill="#b8860b" opacity="0.4"/>
+  <!-- Tower windows -->
+  <rect x="126" y="200" width="18" height="28" fill="#b8860b" opacity="0.6"/>
+  <rect x="126" y="260" width="18" height="28" fill="#b8860b" opacity="0.4"/>
+  <rect x="348" y="200" width="18" height="28" fill="#b8860b" opacity="0.6"/>
+  <rect x="348" y="260" width="18" height="28" fill="#b8860b" opacity="0.4"/>
+  <!-- Moon -->
+  <circle cx="400" cy="80" r="40" fill="#f5e6b0" opacity="0.9"/>
+  <circle cx="418" cy="68" r="34" fill="#0a0604"/>
+  <!-- Stars -->
+  <circle cx="80" cy="60" r="2" fill="#fff" opacity="0.8"/>
+  <circle cx="130" cy="40" r="1.5" fill="#fff" opacity="0.6"/>
+  <circle cx="200" cy="90" r="2" fill="#fff" opacity="0.7"/>
+  <circle cx="310" cy="50" r="1.5" fill="#fff" opacity="0.8"/>
+  <circle cx="450" cy="130" r="2" fill="#fff" opacity="0.6"/>
+  <circle cx="60" cy="110" r="1.5" fill="#fff" opacity="0.7"/>
+  <!-- Title -->
+  <text x="256" y="470" text-anchor="middle" font-family="Georgia, serif" font-size="28" fill="#b8860b" letter-spacing="2">CROWSNEST</text>
+  <text x="256" y="500" text-anchor="middle" font-family="Georgia, serif" font-size="16" fill="#7a5a2a" letter-spacing="4">CASTLE</text>
+</svg>
